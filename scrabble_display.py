@@ -7,14 +7,15 @@ pygame.init()
 CELL_SIZE = 50
 HAND_CELL_SIZE = 40
 BOARD_SIZE = 15
-BOARD_PIXELS = CELL_SIZE * BOARD_SIZE
+BOARD_PIXELS = 750
 HAND_HEIGHT = 120
-LABEL_MARGIN = 25
+LABEL_MARGIN = 30
 SCORE_HEIGHT = 40
 WINDOW_SIZE = (
     BOARD_PIXELS + (LABEL_MARGIN * 2),
-    BOARD_PIXELS + HAND_HEIGHT + LABEL_MARGIN + SCORE_HEIGHT
+    SCORE_HEIGHT + LABEL_MARGIN + BOARD_PIXELS + HAND_HEIGHT
 )
+
 TILE_COLOR = (219, 190, 143)
 BOARD_COLOR = (245, 245, 220)
 GRID_COLOR = (139, 69, 19)
@@ -131,23 +132,32 @@ def draw_board(is_tile_present):
 
 
 def draw_hands(player_1_hand, player_2_hand):
-    # draw background for hands section
-    pygame.draw.rect(screen, HAND_BG_COLOR, (0, BOARD_PIXELS, WINDOW_SIZE[0], HAND_HEIGHT))
-    
+    board_top = SCORE_HEIGHT + LABEL_MARGIN
+    board_bottom = board_top + BOARD_PIXELS
+
     # draw horizontal line separating board from hands
-    pygame.draw.line(screen, GRID_COLOR, (0, BOARD_PIXELS), (WINDOW_SIZE[0], BOARD_PIXELS), 2)
+    pygame.draw.line(screen, GRID_COLOR, (0, board_bottom), (WINDOW_SIZE[0], board_bottom), 2)
+
+    # draw background for hands section
+    pygame.draw.rect(screen, HAND_BG_COLOR, (0, board_bottom, WINDOW_SIZE[0], HAND_HEIGHT))
+
     
     # draw vertical line separating hands
     midpoint_x = WINDOW_SIZE[0] // 2
-    pygame.draw.line(screen, (0, 0, 0), 
-                    (midpoint_x, BOARD_PIXELS), 
-                    (midpoint_x, WINDOW_SIZE[1]), 
-                    3)  # Thicker black line
+    pygame.draw.line(
+        screen, 
+        (0, 0, 0),
+        (midpoint_x, board_bottom), 
+        (midpoint_x, WINDOW_SIZE[1]), 
+        3
+    )
+
     
     # starting positions for each players hand
-    hand_y = BOARD_PIXELS + 10
+    hand_y = board_bottom + 10
     p1_start_x = 10
     p2_start_x = WINDOW_SIZE[0] // 2 + 10
+
     
     # draw player labels
     p1_label = player_font.render("Player 1:", True, FONT_COLOR)
