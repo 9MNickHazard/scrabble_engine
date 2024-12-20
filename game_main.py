@@ -596,26 +596,26 @@ class Scrabble_Game:
 
 
     def game_loop(self):
-        # while True:
-        #     current_player = self.who_goes_first()
-        #     if current_player:
-        #         break
+        while True:
+            current_player = self.who_goes_first()
+            if current_player:
+                break
         
         game_over = False
         game_turn = 0
         conceded = False
 
-        # preset hands and player for testing
-        current_player = 1
-        self.player_1_hand = ['l', 'i', 'n', 'e', 's', 'w', 'a']
-        self.player_2_hand = ['p', 'i', 'n', 'e', 's', 'd', 'e']
+        # # preset hands and player for testing
+        # current_player = 1
+        # self.player_1_hand = ['l', 'i', 'n', 'e', 's', 'w', 'a']
+        # self.player_2_hand = ['p', 'i', 'n', 'e', 's', 'd', 'e']
 
-        # if current_player == 1:
-        #     self.draw_tiles(1)
-        #     self.draw_tiles(2)
-        # else:
-        #     self.draw_tiles(2)
-        #     self.draw_tiles(1)
+        if current_player == 1:
+            self.draw_tiles(1)
+            self.draw_tiles(2)
+        else:
+            self.draw_tiles(2)
+            self.draw_tiles(1)
 
         while not game_over:
             game_turn += 1
