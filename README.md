@@ -13,6 +13,7 @@ Pip Installs:
 - pandas
 - pygame
 - pillow
+- matplotlib
 
 
 ## Installation
