@@ -1,24 +1,29 @@
 # scrabble_engine
 
-This is a project I have been working on for a while which trains and plays against a Deep Q-Network (DQN) Scrabble Engine. Started off as a fun exercise of re-creating scrabble in python and evolved into a fully fledged project on training a Deep Q-Learning Model to be able to predict the next best scrabble move. The trained model included in this repo was trained on an AWS EC2 instance and took approximately 48 hours to train. The model is not perfect by any means at the moment and was only trained for 100 episodes, as there is a large bottleneck in training with regards to the valid moves script, which takes anywhere from 3-10 seconds to run per call. I am still actively working on this project and plan to refine the training process, optimize the valid moves script, and research and implement further ways to improve and build on the foundation I already have.
+This is a project I have been working on for a while which trains and plays against a Deep Q-Network (DQN) Scrabble Engine. Started off as a fun exercise of re-creating scrabble in python and evolved into a fully fledged project on training a Deep Q-Learning Model to be able to predict the next best scrabble move. The trained model included in this repo was trained on an AWS EC2 instance and took approximately 48 hours to train. The model is not perfect by any means at the moment and was only trained for 100 episodes, as there is a large bottleneck in training with regards to the valid moves script, which takes anywhere from 3-10 seconds to run per call. This move script has been updated and ported to Rust for about a 5-8x speed up. I am currently training a new model on AWS with 200 episodes.
 
 
 ## Prerequisites
 
 - Python 3.6+
+- Rust
 
 Pip Installs:
+- maturin (if building rust library on a system other than windows)
 - tensorflow
 - numpy
 - pandas
 - pygame
 - pillow
 - matplotlib
+- /path/to/wheel/file/scrabble_valid_moves_rust-0.1.0-cp310-cp310-win_amd64.whl
 
 
 ## Installation
 
-Clone the repository and install the required dependencies.
+- Clone the repository and install the required dependencies.
+- Either use maturin to build a linux/mac compatible Python library for the Rust script, or pip install the existing .whl file for windows use
+- If using maturin for non-windows build, use command `maturin build --release` in main project directory, then pip install the resulting .whl file
 
 
 ## Training the Model
@@ -70,13 +75,15 @@ Fro ai vs ai (choose models once gui pops up):
 
 - `dqn_main.py`: Main entry point for training
 - `game_api.py`: Scrabble game implementation
-- `valid_moves_script.py`: Move validation and generation
 - `dqn_state.py`: State encoding for the DQN
 - `dqn_reward_functions.py`: Reward calculation
 - `dqn_model.py`: DQN model implementation
 - `self_play.py`: Self-play training framework
 - `ai_vs_ai_gui.py`: GUI for finished models to play each other
 - `human_vs_ai_gui.py`: GUI for you to play against a finished model
+- `scrabble_valid_moves_rust-0.1.0-cp310-cp310-win_amd64.whl`: Windows packaged rust library for python for valid moves script
+- `/src/lib.rs`: Main rust script for valid moves algorithm
+- `/src/main.rs`: File for testing valid moves script on example board state and player hand
 
 ## Output
 
