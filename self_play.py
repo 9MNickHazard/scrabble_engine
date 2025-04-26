@@ -57,8 +57,8 @@ class ScrabbleSelfPlay:
                 if game.current_player == 1:
                     state = self.state_encoder.get_state_representation(game, 1)
 
-                    # debug
-                    print(f"Unseen tiles (Player 1's view): {state['unseen']}")
+                    # # debug
+                    # print(f"Unseen tiles (Player 1's view): {state['unseen']}")
                     
                     valid_moves = game.get_all_valid_moves(1)
                     
@@ -85,14 +85,14 @@ class ScrabbleSelfPlay:
                     
                     agent1.replay(batch_size)
 
-                    # debug
-                    print(f"Player 1 hand after move: {game.player_1_hand}")
+                    # # debug
+                    # print(f"Player 1 hand after move: {game.player_1_hand}")
                 
                 elif game.current_player == 2:
                     state = self.state_encoder.get_state_representation(game, 2)
 
-                    # debug
-                    print(f"Unseen tiles (Player 2's view): {state['unseen']}")
+                    # # debug
+                    # print(f"Unseen tiles (Player 2's view): {state['unseen']}")
                     
                     valid_moves = game.get_all_valid_moves(2)
                     
@@ -119,13 +119,13 @@ class ScrabbleSelfPlay:
                     
                     agent2.replay(batch_size)
 
-                    # debug
-                    print(f"Player 2 hand after move: {game.player_2_hand}")
+                    # # debug
+                    # print(f"Player 2 hand after move: {game.player_2_hand}")
                 
                 episode_length += 1
 
-                # debug
-                print(f"Episode {episode+1}/{num_episodes}, Turn {episode_length}")
+                # # debug
+                # print(f"Episode {episode+1}/{num_episodes}, Turn {episode_length}")
             
             if episode % target_update_freq == 0:
                 agent1.update_target_model()
