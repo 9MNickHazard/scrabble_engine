@@ -97,7 +97,7 @@ class ScrabbleDQN:
     
     def act(self, state, valid_moves, reward_calculator, game_state, player_id):
         """
-        Choose action based on epsilon-greedy policy
+        Choose action on epsilon-greedy policy
         
         Args:
             state: Current state
@@ -113,7 +113,10 @@ class ScrabbleDQN:
             return None
         
         if np.random.rand() <= self.epsilon:
-            scored_moves = reward_calculator.estimate_move_quality(game_state, player_id, valid_moves)
+            scored_moves = reward_calculator.estimate_move_quality(game_state, valid_moves)
+            # # debug
+            # print(f"Move qualities:\n{scored_moves}")
+
             top_moves = scored_moves[:max(1, len(scored_moves)//4)]
             return random.choice(top_moves)['move']
         
@@ -121,6 +124,7 @@ class ScrabbleDQN:
         hand_state = np.expand_dims(state['hand'], axis=0)
         unseen_state = np.expand_dims(state['unseen'], axis=0)
         game_features = np.expand_dims(state['game_features'], axis=0)
+
         
         move_features = self.model.predict(
             [board_state, hand_state, unseen_state, game_features],
@@ -144,22 +148,15 @@ class ScrabbleDQN:
             else:
                 tiles_used = len(move['word'])
             
-            uses_blank = 'blank_assignments' in move and move['blank_assignments']
-            blank_value = 0
-            if uses_blank:
-                for _, letter in move['blank_assignments'].items():
-                    letter_value = reward_calculator.letter_point_values.get(letter.lower(), 0)
-                    blank_value += letter_value / reward_calculator.max_letter_value
             
             norm_score = score_value / 50.0
             norm_tiles = tiles_used / 7.0
-            norm_blank = blank_value / 1.0
             
             move_value = (
                 move_features[0] * norm_score +
                 move_features[1] * (1.0 - (len(valid_moves) / 100.0)) +
                 move_features[2] * norm_tiles +
-                move_features[3] * norm_blank
+                move_features[3]
             )
             
             if move_value > best_value:
@@ -168,9 +165,60 @@ class ScrabbleDQN:
         
         return best_move
     
+    # def replay(self, batch_size):
+    #     """
+    #     Train model using experience replay
+        
+    #     Args:
+    #         batch_size: Number of experiences to sample
+    #     """
+    #     if len(self.memory) < batch_size:
+    #         return
+        
+    #     minibatch = random.sample(self.memory, batch_size)
+
+    #     for state, action_idx, reward, next_state, done in minibatch:
+    #         board_state = np.expand_dims(state['board'], axis=0)
+    #         hand_state = np.expand_dims(state['hand'], axis=0)
+    #         unseen_state = np.expand_dims(state['unseen'], axis=0)
+    #         game_features = np.expand_dims(state['game_features'], axis=0)
+
+    #         target_q = np.zeros_like(self.model.predict([board_state, hand_state, unseen_state, game_features], verbose=0)[0])
+
+    #         if done:
+    #             target_q[:] = reward
+    #         else:
+    #             next_board = np.expand_dims(next_state['board'], axis=0)
+    #             next_hand = np.expand_dims(next_state['hand'], axis=0)
+    #             next_unseen = np.expand_dims(next_state['unseen'], axis=0)
+    #             next_game_features = np.expand_dims(next_state['game_features'], axis=0)
+
+    #             next_q_values = self.target_model.predict(
+    #                 [next_board, next_hand, next_unseen, next_game_features],
+    #                 verbose=0
+    #             )[0]
+    #             target_q = reward + self.gamma * next_q_values
+
+    #         current_q_values = self.model.predict(
+    #             [board_state, hand_state, unseen_state, game_features],
+    #             verbose=0
+    #         )
+
+    #         target_f = current_q_values[0]
+    #         target_f[:] = target_q
+
+    #         self.model.fit(
+    #             [board_state, hand_state, unseen_state, game_features],
+    #             np.expand_dims(target_f, axis=0),
+    #             epochs=1, verbose=0
+    #         )
+        
+    #     if self.epsilon > self.epsilon_min:
+    #         self.epsilon *= self.epsilon_decay
+
     def replay(self, batch_size):
         """
-        Train model using experience replay
+        Train model using experience replay with efficient batching
         
         Args:
             batch_size: Number of experiences to sample
@@ -179,42 +227,46 @@ class ScrabbleDQN:
             return
         
         minibatch = random.sample(self.memory, batch_size)
-
-        for state, action_idx, reward, next_state, done in minibatch:
-            board_state = np.expand_dims(state['board'], axis=0)
-            hand_state = np.expand_dims(state['hand'], axis=0)
-            unseen_state = np.expand_dims(state['unseen'], axis=0)
-            game_features = np.expand_dims(state['game_features'], axis=0)
-
-            target_q = np.zeros_like(self.model.predict([board_state, hand_state, unseen_state, game_features], verbose=0)[0])
-
-            if done:
-                target_q[:] = reward
-            else:
-                next_board = np.expand_dims(next_state['board'], axis=0)
-                next_hand = np.expand_dims(next_state['hand'], axis=0)
-                next_unseen = np.expand_dims(next_state['unseen'], axis=0)
-                next_game_features = np.expand_dims(next_state['game_features'], axis=0)
-
-                next_q_values = self.target_model.predict(
-                    [next_board, next_hand, next_unseen, next_game_features],
-                    verbose=0
-                )[0]
-                target_q = reward + self.gamma * next_q_values
-
-            current_q_values = self.model.predict(
-                [board_state, hand_state, unseen_state, game_features],
+        
+        board_states = np.array([state['board'] for state, _, _, _, _ in minibatch])
+        hand_states = np.array([state['hand'] for state, _, _, _, _ in minibatch])
+        unseen_states = np.array([state['unseen'] for state, _, _, _, _ in minibatch])
+        game_features = np.array([state['game_features'] for state, _, _, _, _ in minibatch])
+        
+        rewards = np.array([reward for _, _, reward, _, _ in minibatch])
+        dones = np.array([done for _, _, _, _, done in minibatch])
+        
+        current_q_values = self.model.predict(
+            [board_states, hand_states, unseen_states, game_features],
+            verbose=0
+        )
+        
+        target_f = current_q_values.copy()
+        
+        target_f[dones] = np.expand_dims(rewards[dones], axis=1)
+        
+        if not np.all(dones):
+            next_indices = np.where(~dones)[0]
+            next_board = np.array([minibatch[i][3]['board'] for i in next_indices])
+            next_hand = np.array([minibatch[i][3]['hand'] for i in next_indices])
+            next_unseen = np.array([minibatch[i][3]['unseen'] for i in next_indices])
+            next_game_features = np.array([minibatch[i][3]['game_features'] for i in next_indices])
+            
+            next_q_values = self.target_model.predict(
+                [next_board, next_hand, next_unseen, next_game_features],
                 verbose=0
             )
-
-            target_f = current_q_values[0]
-            target_f[:] = target_q
-
-            self.model.fit(
-                [board_state, hand_state, unseen_state, game_features],
-                np.expand_dims(target_f, axis=0),
-                epochs=1, verbose=0
-            )
+            
+            for idx, next_idx in enumerate(next_indices):
+                target_f[next_idx] = rewards[next_idx] + self.gamma * next_q_values[idx]
+        
+        self.model.fit(
+            [board_states, hand_states, unseen_states, game_features],
+            target_f,
+            epochs=1, 
+            verbose=0,
+            batch_size=batch_size
+        )
         
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay

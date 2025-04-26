@@ -3,8 +3,7 @@ import copy
 from collections import Counter
 import time
 import json
-import pandas as pd
-from valid_moves_script import ScrabbleAllValidMoves
+import scrabble_valid_moves_rust
 
 class Board_and_Variables:
     special_spaces = {
@@ -54,18 +53,33 @@ class Scrabble_Game:
         
         self.blank_tile_assignments = {}
 
+        self.words_set = set()
+        dictionary_path = "word_dictionary.csv"
+
         try:
-            self.words_df = pd.read_csv("word_dictionary.csv")
-            self.words_set = set(str(word).lower() for word in self.words_df['legal_scrabble_words'].values)
-            print("game_api: Dictionary loaded successfully.")
+            with open(dictionary_path, 'r', encoding='utf-8') as f:
+                header = next(f, None)
+                if header:
+                    print(f"game_api: Skipped dictionary header: {header.strip()}")
+                else:
+                    print(f"game_api: WARNING - Dictionary file '{dictionary_path}' appears empty.")
+
+                for line in f:
+                    word = line.strip().lower()
+                    if word:
+                        self.words_set.add(word)
+
+            if not self.words_set and header:
+                print(f"game_api: WARNING - Dictionary file '{dictionary_path}' loaded, but no words were added to words_set.")
+            elif self.words_set:
+                print(f"game_api: Dictionary loaded successfully into self.words_set ({len(self.words_set)} words).")
+
         except FileNotFoundError:
-            print("ERROR: word_dictionary.csv not found in game_api. Validation will fail.")
-            self.words_df = None
-            self.words_set = set()
+            print(f"game_api: FATAL ERROR - Dictionary file not found at '{dictionary_path}'")
+            raise
         except Exception as e:
-            print(f"Error loading dictionary in game_api: {e}")
-            self.words_df = None
-            self.words_set = set()
+            print(f"game_api: An unexpected error occurred loading dictionary into self.words_set: {e}")
+            raise
         
         for row_char in 'abcdefghijklmno':
             for col_num in range(1, 16):
@@ -551,6 +565,8 @@ class Scrabble_Game:
                     return False
         
         if tiles_placed_count > 0:
+            #  # debug
+            #  print(f"Hand after playing move: {hand}")
              newly_drawn = self.draw_tiles(player_id, tiles_placed_count)
         else:
              print("DEBUG (Game API): No tiles placed, skipping draw.")
@@ -655,32 +671,48 @@ class Scrabble_Game:
         """
         Args:
             player_id: ID of the player
-            
+
         Returns:
-            list: List of valid moves
+            list: List of valid moves (list of dictionaries)
         """
-        move_generator = ScrabbleAllValidMoves(
-            board_state=self.is_tile_present,
-            player_hand=self.player_1_hand if player_id == 1 else self.player_2_hand
-        )
-        
-        move_generator.blank_tile_assignments = self.blank_tile_assignments.copy()
-        
-        valid_moves = move_generator.get_all_valid_moves()
-        
+        current_hand = self.player_1_hand if player_id == 1 else self.player_2_hand
+
+        board_for_rust = {}
+        for pos, data in self.is_tile_present.items():
+            if data[0]:
+                board_for_rust[pos] = data[1]
+
+        try:
+            valid_moves = scrabble_valid_moves_rust.get_valid_moves_rs(board_for_rust, current_hand)
+        except Exception as e:
+            print(f"Error calling Rust move generator: {e}")
+            print(f"Board passed: {board_for_rust}")
+            print(f"Hand passed: {current_hand}")
+            valid_moves = []
+
+
         for move in valid_moves:
-            if 'positions' not in move:
+            if 'positions' not in move or not move['positions']:
+                print(f"Warning: Move missing positions: {move}")
                 start = move['start_space']
                 direction = move['direction']
                 word = move['word']
-                row_char = start[0]
-                col_num = int(''.join(filter(str.isdigit, start)))
-                
-                if direction == 'right':
-                    positions = [f"{row_char}{c}" for c in range(col_num, col_num + len(word))]
-                else:
-                    positions = [f"{chr(r)}{col_num}" for r in range(ord(row_char), ord(row_char) + len(word))]
-                
-                move['positions'] = positions
-        
+                positions = []
+                try:
+                    row_char = start[0]
+                    col_num = int(''.join(filter(str.isdigit, start)))
+                    if direction == 'right':
+                        positions = [f"{row_char}{c}" for c in range(col_num, col_num + len(word))]
+                    elif direction == 'down':
+                        positions = [f"{chr(r)}{col_num}" for r in range(ord(row_char), ord(row_char) + len(word))]
+                    move['positions'] = positions
+                except Exception as pos_err:
+                    print(f"Error reconstructing positions for move {move}: {pos_err}")
+                    move['positions'] = []
+
+
+            move['player_id'] = player_id
+            move['score'] = int(move.get('score', 0))
+
+
         return valid_moves

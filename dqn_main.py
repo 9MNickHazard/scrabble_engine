@@ -5,7 +5,7 @@ import numpy as np
 import random
 import copy
 from game_api import Scrabble_Game
-from valid_moves_script import load_dictionary as load_move_gen_dictionary
+# from valid_moves_script import load_dictionary as load_move_gen_dictionary
 from dqn_state import ScrabbleDQNState
 from dqn_reward_functions import ScrabbleDQNReward
 from dqn_model import ScrabbleDQN
@@ -73,7 +73,7 @@ def train_model(args):
 
 def main():
     print("Main: Loading dictionary for move generator...")
-    load_move_gen_dictionary()
+    # load_move_gen_dictionary()
     parser = argparse.ArgumentParser(description='Scrabble DQN')
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
     
@@ -88,8 +88,8 @@ def main():
     train_parser.add_argument('--batch-size', type=int, default=64, help='Batch size for training')
     train_parser.add_argument('--target-update-freq', type=int, default=5, help='Target network update frequency')
     train_parser.add_argument('--checkpoint-freq', type=int, default=100, help='Checkpoint frequency')
-    train_parser.add_argument('--win-reward', type=float, default=100, help='Reward for winning')
-    train_parser.add_argument('--loss-penalty', type=float, default=-100, help='Penalty for losing')
+    train_parser.add_argument('--win-reward', type=float, default=100.0, help='Reward for winning')
+    train_parser.add_argument('--loss-penalty', type=float, default=-100.0, help='Penalty for losing')
     train_parser.add_argument('--separate-agents', action='store_true', help='Use separate agents for players')
     train_parser.add_argument('--model-dir', type=str, default='./models', help='Directory to save models')
     train_parser.add_argument('--log-dir', type=str, default='./logs', help='Directory to save logs')
