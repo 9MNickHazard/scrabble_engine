@@ -1,5 +1,7 @@
 # scrabble_engine
 
+## NOTE (4/30/25): Using "human vs ai" or "ai vs ai" will not currently work until the new 7 output model is finished training on AWS and is uploaded to this repo. 
+
 This is a project I have been working on for a while which trains and plays against a Deep Q-Network (DQN) Scrabble Engine. Started off as a fun exercise of re-creating scrabble in python and evolved into a fully fledged project on training a Deep Q-Learning Model to be able to predict the next best scrabble move. The new model now included in this repo was trained on an AWS EC2 instance and took approximately 34 hours to train for 200 episodes, a drastic increase in efficiency, with the last model taking around 50 hours for 100 episodes. I made some crucial tweaks (all included in the files currently in this repo) to the reward functions, that has made a massive difference in the capabilities of the resulting model.
 
 
