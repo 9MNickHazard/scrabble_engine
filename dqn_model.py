@@ -65,7 +65,7 @@ class ScrabbleDQN:
         x = layers.BatchNormalization()(x)
         x = layers.Dense(128, activation='relu')(x)
         
-        outputs = layers.Dense(4, activation='linear')(x)
+        outputs = layers.Dense(7, activation='linear')(x)
         
         model = models.Model(
             inputs=[board_input, hand_input, unseen_input, game_features_input],
@@ -133,31 +133,66 @@ class ScrabbleDQN:
         
         best_move = None
         best_value = float('-inf')
+
+        current_hand = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
         
         for move in valid_moves:
             score_value = move['score']
             
             tiles_used = 0
+            hand_after_move = current_hand.copy()
+            played_positions = []
+
             if 'positions' in move:
                 for pos in move['positions']:
                     if pos in game_state.is_tile_present:
                         if not game_state.is_tile_present[pos][0]:
-                            tiles_used += 1
+                            for i, placed_pos in enumerate(move['positions']):
+                                if placed_pos == pos:
+                                    letter = move['word'][i].lower()
+                                    tiles_used += 1
+                                    played_positions.append(pos)
+                                    if letter in hand_after_move:
+                                        hand_after_move.remove(letter)
+                                    elif '_' in hand_after_move:
+                                        hand_after_move.remove('_')
+                                    break
                     else:
-                        tiles_used += 1
+                        for i, placed_pos in enumerate(move['positions']):
+                            if placed_pos == pos:
+                                letter = move['word'][i].lower()
+                                tiles_used += 1
+                                played_positions.append(pos)
+                                if letter in hand_after_move:
+                                    hand_after_move.remove(letter)
+                                elif '_' in hand_after_move:
+                                    hand_after_move.remove('_')
+                                break
             else:
                 tiles_used = len(move['word'])
             
+            bingo_potential = reward_calculator._evaluate_bingo_potential(hand_after_move, state['unseen'])
+            setup_value = reward_calculator.calculate_setup_value(game_state, move, player_id)
+            defensive_value = reward_calculator.calculate_defensive_value(game_state, move, played_positions, state['unseen'])
             
             norm_score = score_value / 50.0
             norm_tiles = tiles_used / 7.0
+            norm_bingo_potential = bingo_potential / 10.0
+            norm_setup = setup_value / 10.0
+            norm_defensive = defensive_value / 8.0
             
             move_value = (
                 move_features[0] * norm_score +
                 move_features[1] * (1.0 - (len(valid_moves) / 100.0)) +
                 move_features[2] * norm_tiles +
-                move_features[3]
+                move_features[3] * norm_bingo_potential +
+                move_features[4] * norm_setup + 
+                move_features[5] * norm_defensive +
+                move_features[6]
             )
+
+            # # debug
+            # print(f"norm_score: {norm_score} | original: {score_value}\nnorm_tiles: {norm_tiles} | original: {tiles_used}\nnorm_bingo_potential: {norm_bingo_potential} | original: {bingo_potential}\nnorm_setup: {norm_setup} | original: {setup_value}\nnorm_defensive: {norm_defensive} | original: {defensive_value}\nmove_value: {move_value}\nmove_features[0]: {move_features[0]}\nmove_features[1]: {move_features[1]}\nmove_features[2]: {move_features[2]}\nmove_features[3]: {move_features[3]}\nmove_features[4]: {move_features[4]}\nmove_features[5]: {move_features[5]}\nmove_features[6]: {move_features[6]}\n")
             
             if move_value > best_value:
                 best_value = move_value
@@ -243,7 +278,8 @@ class ScrabbleDQN:
         
         target_f = current_q_values.copy()
         
-        target_f[dones] = np.expand_dims(rewards[dones], axis=1)
+        for i, idx in enumerate(np.where(dones)[0]):
+            target_f[idx] = rewards[idx]
         
         if not np.all(dones):
             next_indices = np.where(~dones)[0]
@@ -285,3 +321,15 @@ class ScrabbleDQN:
             name: Path to save weights
         """
         self.model.save_weights(name)
+    
+    def normalize_strategic_value(value):
+        """
+        Normalizes any strategic value to range [0,1] using a sigmoid function.
+        
+        Args:
+            value: The raw strategic value
+        
+        Returns:
+            float: Normalized value between 0 and 1
+        """
+        return 1.0 / (1.0 + np.exp(-value))

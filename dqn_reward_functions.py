@@ -19,14 +19,16 @@ class ScrabbleDQNReward:
         """
         Calculate the reward for a move considering:
         1. Immediate score from the move
-        2. Tile usage efficiency
+        2. Tile usage
         3. If bingo is not played and lower scoring move is all that is possible, reward for keeping better bingo tiles
-        4. Game outcome (win/loss/draw)
+        4. Setuping up good future moves
+        5. Defensive plays
+        6. Game outcome (win/loss/draw)
         
         Args:
             game_state: Current game state before the move
             player_id: ID of the player making the move (1 or 2)
-            move: The move being evaluated (dict with word, start_space, direction, etc.)
+            move: The move being evaluated
             next_game_state: Game state after the move
             
         Returns:
@@ -59,6 +61,24 @@ class ScrabbleDQNReward:
             else:
                 print(f"Warning: calculate_bingo_potential_reward returned None.")
 
+        # played positions for defensive reward
+        played_positions = []
+        if move and 'positions' in move:
+            for pos in move['positions']:
+                if pos in game_state.is_tile_present:
+                    if not game_state.is_tile_present[pos][0]:
+                        played_positions.append(pos)
+            
+        # setup value reward
+        if move:
+            setup_reward = self.calculate_setup_value(game_state, move, player_id)
+            reward += setup_reward
+            
+        # defensive play reward
+        if move and played_positions:
+            state = self.state_encoder.get_state_representation(game_state, player_id)
+            defensive_reward = self.calculate_defensive_value(game_state, move, played_positions, state['unseen'])
+            reward += defensive_reward
 
         # game outcome
         if next_game_state and next_game_state.game_over:
@@ -102,10 +122,10 @@ class ScrabbleDQNReward:
         """
         Args:
             game_state: Game state after the move
-            player_id: ID of the player making the move
+            player_id: Current player ID
             
         Returns:
-            float: Outcome reward
+            float: Game outcome reward
         """
         player_score = game_state.player_1_score if player_id == 1 else game_state.player_2_score
         opponent_score = game_state.player_2_score if player_id == 1 else game_state.player_1_score
@@ -120,6 +140,14 @@ class ScrabbleDQNReward:
     def calculate_bingo_potential_reward(self, move, game_state, player_id):
         """
         Calculate a reward based on the bingo potential of the hand after playing a move.
+
+        Args:
+            move: Move being evaluated
+            game_state: Current game state
+            player_id: Current player ID
+        
+        Returns:
+            float: Bingo potential reward
         """
         current_hand = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
         
@@ -160,7 +188,7 @@ class ScrabbleDQNReward:
         
         Args:
             hand: Current hand after move
-            unseen_vector: 27-dimensional numpy vector of unseen tiles
+            unseen_vector: unseen tiles vector
             
         Returns:
             float: Bingo potential score
@@ -264,11 +292,10 @@ class ScrabbleDQNReward:
         considering vowel/consonant balance.
         
         Args:
-            hand: Current hand
             vowel_count: Number of vowels in hand
             consonant_count: Number of consonants in hand
             letter_counts: Dictionary of current letter counts
-            unseen_tiles: unseen tiles array (in opponents hand and in bag)
+            unseen_tiles: unseen tiles vector
             
         Returns:
             set: Letters that would be most helpful
@@ -313,7 +340,7 @@ class ScrabbleDQNReward:
 
     def estimate_move_quality(self, game_state, moves):
         """
-        Estimate the quality of potential moves, incorporating bingo potential.
+        Estimate the quality of potential moves.
         
         Args:
             game_state: Current game state
@@ -464,13 +491,26 @@ class ScrabbleDQNReward:
                     duplicate_penalty +
                     2.0 * draw_potential
                 )
+
+                played_positions = []
+                if 'positions' in move:
+                    for pos in move['positions']:
+                        if pos in game_state.is_tile_present:
+                            if not game_state.is_tile_present[pos][0]:
+                                played_positions.append(pos)
+
+                setup_value = self.calculate_setup_value(game_state, move, player_id)
+
+                defensive_value = 0
+                if tiles_from_hand < 7 and move['score'] < 50:
+                    defensive_value = self.calculate_defensive_value(game_state, move, played_positions, unseen_vector)
                 
                 if move['score'] < 20:
-                    quality += bingo_potential * 0.8
+                    quality += (bingo_potential * 0.8) + (setup_value * 0.3) + (defensive_value * 0.3)
                 elif move['score'] < 30:
-                    quality += bingo_potential * 0.5
+                    quality += (bingo_potential * 0.5) + (setup_value * 0.2) + (defensive_value * 0.2)
                 else:
-                    quality += bingo_potential * 0.2
+                    quality += (bingo_potential * 0.2) + (setup_value * 0.1) + (defensive_value * 0.1)
             
             scored_moves.append({
                 'move': move,
@@ -490,3 +530,250 @@ class ScrabbleDQNReward:
         result = total_score / len(moves)
 
         return result
+    
+
+    def calculate_setup_value(self, game_state, move, player_id):
+        """
+        Calculate how well a move creates hook opportunities with letters
+        still in the player's hand after the move.
+
+        Args:
+            game_state: Current game state
+            move: Move being evaluated
+            player_id: Current player ID
+        
+        Returns:
+            float: Setup value of the move
+        """
+        value = 0.0
+        
+        # get word played
+        word = move['word'].lower() if 'word' in move else ""
+        if not word:
+            return 0.0
+        
+        current_hand = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
+        
+        hand_after_move = current_hand.copy()
+        
+        # remove letters used in the played word
+        if 'positions' in move:
+            for pos in move['positions']:
+                if pos in game_state.is_tile_present:
+                    if not game_state.is_tile_present[pos][0]:
+                        for i, placed_pos in enumerate(move['positions']):
+                            if placed_pos == pos:
+                                letter = move['word'][i].lower()
+                                if letter in hand_after_move:
+                                    hand_after_move.remove(letter)
+                                elif '_' in hand_after_move:
+                                    hand_after_move.remove('_')
+                                break
+        
+        # for each letter left in hand after word played, check if it can hook onto the played word
+        valid_hooks_found = 0
+        blanks_count = hand_after_move.count('_')
+        
+        # check prefix hooks
+        for letter in set(hand_after_move):
+            if letter == '_':
+                continue
+                
+            # check if adding this letter to the beginning of the word forms a valid word
+            prefix_word = letter + word
+            if prefix_word in game_state.words_set:
+                valid_hooks_found += 1
+                if letter == 's':
+                    value += 3.0
+                else:
+                    value += 2.0
+        
+        # check suffix hooks
+        for letter in set(hand_after_move):
+            if letter == '_':
+                continue
+                
+            # check if adding letter to the end of the word forms a valid word
+            suffix_word = word + letter
+            if suffix_word in game_state.words_set:
+                valid_hooks_found += 1
+                if letter == 's':
+                    value += 3.0
+                else:
+                    value += 2.0
+        
+        # check blank hooks
+        if blanks_count > 0:
+            for letter in 'abcdefghijklmnopqrstuvwxyz':
+                # prefix hook
+                prefix_word = letter + word
+                if prefix_word in game_state.words_set:
+                    value += 1.0
+                    break
+                    
+            for letter in 'abcdefghijklmnopqrstuvwxyz':
+                # suffix hook
+                suffix_word = word + letter
+                if suffix_word in game_state.words_set:
+                    value += 1.0
+                    break
+        
+        # check other conditions for hook playability
+        can_prefix = True
+        can_suffix = True
+
+        if 'positions' in move and len(move['positions']) > 0:
+            direction = move.get('direction', '')
+            
+            # prefix limitations
+            if direction == 'right':
+                first_pos = move['positions'][0]
+                first_col = int(''.join(filter(str.isdigit, first_pos)))
+                if first_col == 1:  # left edge
+                    can_prefix = False
+            elif direction == 'down':
+                first_pos = move['positions'][0]
+                first_row = first_pos[0]
+                if first_row == 'a':  # top edge
+                    can_prefix = False
+            
+            # suffix limitations
+            if direction == 'right':
+                last_pos = move['positions'][-1]
+                last_col = int(''.join(filter(str.isdigit, last_pos)))
+                if last_col == 15:  # right edge
+                    can_suffix = False
+            elif direction == 'down':
+                last_pos = move['positions'][-1]
+                last_row = last_pos[0]
+                if last_row == 'o':  # bottom edge
+                    can_suffix = False
+
+        # small negative reward if hooks are physically impossible
+        if valid_hooks_found > 0:
+            if not can_prefix and not can_suffix:
+                value -= 1.0  # both hook types impossible
+            elif not can_prefix or not can_suffix:
+                value -= 0.5  # one hook type impossible
+            else:
+                value += 1.0
+        
+        return value
+
+    def calculate_defensive_value(self, game_state, move, played_positions, unseen_vector):
+        """
+        Calculate how effectively a move blocks premium squares through strategic letter placement.
+        
+        Args:
+            game_state: Current game state
+            move: Move being evaluated
+            played_positions: Positions where tiles are being placed
+            unseen_vector: Vector of unseen tiles
+        
+        Returns:
+            float: Defensive value of the move
+        """
+
+        if move and 'score' in move and move['score'] >= 50:
+            return 0.0
+
+        value = 0.0
+
+        two_letter_words = {
+            'aa', 'ab', 'ad', 'ae', 'ag', 'ah', 'ai', 'al', 'am', 'an', 'ar', 'as', 'at', 'aw', 'ax', 'ay',
+            'ba', 'be', 'bi', 'bo', 'by', 'da', 'de', 'do', 'ed', 'ef', 'eh', 'el', 'em', 'en', 'er', 'es',
+            'et', 'ew', 'ex', 'fa', 'fe', 'gi', 'go', 'ha', 'he', 'hi', 'hm', 'ho', 'id', 'if', 'in', 'is',
+            'it', 'jo', 'ka', 'ki', 'la', 'li', 'lo', 'ma', 'me', 'mi', 'mm', 'mo', 'mu', 'my', 'ne', 'no',
+            'nu', 'od', 'oe', 'of', 'oh', 'oi', 'ok', 'om', 'on', 'op', 'or', 'os', 'ow', 'ox', 'oy', 'pa',
+            'pe', 'pi', 'po', 'qi', 're', 'sh', 'si', 'so', 'ta', 'te', 'ti', 'to', 'uh', 'um', 'un', 'up',
+            'us', 'ut', 'we', 'wo', 'xi', 'xu', 'ya', 'ye', 'yo', 'za'
+        }
+        
+        # lookup dictionaries for second-letter possibilities
+        second_letter_options = {}
+        for word in two_letter_words:
+            if word[0] not in second_letter_options:
+                second_letter_options[word[0]] = set()
+            second_letter_options[word[0]].add(word[1])
+        
+        first_letter_options = {}
+        for word in two_letter_words:
+            if word[1] not in first_letter_options:
+                first_letter_options[word[1]] = set()
+            first_letter_options[word[1]].add(word[0])
+        
+        # premium squares to defend
+        premium_squares = []
+        for pos, special in game_state.special_spaces.items():
+            if special in ['triple_word', 'double_word']:
+                premium_squares.append((pos, special))
+        
+        # check for blocking moves around premium squares
+        for pos in played_positions:
+            row_char = pos[0]
+            col_num = int(''.join(filter(str.isdigit, pos)))
+            letter_placed = None
+            
+            # which letter was placed here
+            if 'positions' in move:
+                for i, placed_pos in enumerate(move['positions']):
+                    if placed_pos == pos:
+                        letter_placed = move['word'][i].lower()
+                        break
+            
+            if not letter_placed:
+                continue
+                
+            # check adjacent positions for premium squares
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                r_ord = ord(row_char) + dr
+                c = col_num + dc
+                
+                if r_ord < ord('a') or r_ord > ord('o') or c < 1 or c > 15:
+                    continue
+                    
+                adjacent_pos = f"{chr(r_ord)}{c}"
+                
+                # is this premium square thats empty
+                for square_pos, square_type in premium_squares:
+                    if adjacent_pos == square_pos and (adjacent_pos in game_state.is_tile_present and 
+                                                    not game_state.is_tile_present[adjacent_pos][0]):
+                        square_value = 3.0 if square_type == 'triple_word' else 2.0 if square_type == 'double_word' else 1.0
+                        
+                        # direction of potential play
+                        is_vertical = dr != 0  # letter is above/below the premium square
+                        
+                        # how many valid two letter options exist
+                        if is_vertical:
+                            if dr < 0:  # premium square is below letter
+                                connecting_options = second_letter_options.get(letter_placed, set())
+                            else:  # premium square is above letter
+                                connecting_options = first_letter_options.get(letter_placed, set())
+                        else:
+                            if dc < 0:  # premium square is right of letter
+                                connecting_options = second_letter_options.get(letter_placed, set())
+                            else:  # premium square is left of letter
+                                connecting_options = first_letter_options.get(letter_placed, set())
+                        
+                        # how many of these options are available to opponent
+                        available_options = 0
+                        for option in connecting_options:
+                            option_idx = ord(option) - ord('a')
+                            if option_idx >= 0 and option_idx < 26 and unseen_vector[option_idx] > 0:
+                                available_options += 1
+                        
+                        # blocking effectiveness (high when few or no options exist)
+                        if len(connecting_options) == 0:
+                            # no valid two letter words can be formed
+                            value += square_value * 3.0
+                        elif available_options == 0:
+                            # connecting letters have been played already
+                            value += square_value * 2.5
+                        elif len(connecting_options) <= 2:
+                            # limited options (like 'c' which only connects with 'h')
+                            value += square_value * (1.0 + (1.0 - available_options/len(connecting_options)))
+                        elif available_options <= 2:
+                            # few connecting letters remain available
+                            value += square_value * 0.5
+        
+        return value
