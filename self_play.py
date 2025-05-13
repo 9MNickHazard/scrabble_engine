@@ -136,8 +136,8 @@ class ScrabbleSelfPlay:
                 
                 episode_length += 1
 
-                # debug
-                print(f'Turn: {episode_length}')
+                # # debug
+                # print(f'Turn: {episode_length}')
             
             if episode % target_update_freq == 0:
                 agent1.update_target_model()

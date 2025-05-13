@@ -908,7 +908,7 @@ class ScrabbleDQNReward:
             if len(current_hand) >= 6 and tiles_played_from_hand < 2:
                 reward -= 5.0
         
-        # debug
-        print(f'Endgame reward: {reward}')
+        # # debug
+        # print(f'Endgame reward: {reward}')
 
         return reward
