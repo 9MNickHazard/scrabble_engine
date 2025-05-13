@@ -4,6 +4,8 @@ import numpy as np
 import random
 from collections import deque
 
+import pandas as pd
+
 class ScrabbleDQN:
     def __init__(self, state_size=(15, 15, 27), hand_size=27, unseen_size=27, 
                  game_features_size=5, learning_rate=0.001, gamma=0.95, epsilon=1.0,
@@ -24,6 +26,10 @@ class ScrabbleDQN:
         self.model = self._build_model()
         self.target_model = self._build_model()
         self.update_target_model()
+
+        # # debug
+        # self.move_evaluation_log = []
+        # self.log_eval_start_episode = 170
         
     def _build_model(self):
         """
@@ -95,7 +101,7 @@ class ScrabbleDQN:
         """
         self.memory.append((state, action, reward, next_state, done))
     
-    def act(self, state, valid_moves, reward_calculator, game_state, player_id):
+    def act(self, state, valid_moves, reward_calculator, game_state, player_id, episode_num=0):
         """
         Choose action on epsilon-greedy policy
         
@@ -117,7 +123,7 @@ class ScrabbleDQN:
             # # debug
             # print(f"Move qualities:\n{scored_moves}")
 
-            top_moves = scored_moves[:max(1, len(scored_moves)//4)]
+            top_moves = scored_moves[:max(1, len(scored_moves)//5)]
             return random.choice(top_moves)['move']
         
         board_state = np.expand_dims(state['board'], axis=0)
@@ -174,82 +180,58 @@ class ScrabbleDQN:
             bingo_potential = reward_calculator._evaluate_bingo_potential(hand_after_move, state['unseen'])
             setup_value = reward_calculator.calculate_setup_value(game_state, move, player_id)
             defensive_value = reward_calculator.calculate_defensive_value(game_state, move, played_positions, state['unseen'])
+            endgame_value = reward_calculator.calculate_endgame_strategy_reward(game_state, move, player_id, None, state)
             
-            norm_score = score_value / 50.0
+            norm_score = score_value / 20.0
             norm_tiles = tiles_used / 7.0
-            norm_bingo_potential = bingo_potential / 10.0
-            norm_setup = setup_value / 10.0
+            norm_bingo_potential = bingo_potential / 6.0
+            norm_setup = setup_value / 4.0
             norm_defensive = defensive_value / 8.0
+            norm_endgame = endgame_value / 8.0
+
             
             move_value = (
                 move_features[0] * norm_score +
-                move_features[1] * (1.0 - (len(valid_moves) / 100.0)) +
-                move_features[2] * norm_tiles +
-                move_features[3] * norm_bingo_potential +
-                move_features[4] * norm_setup + 
-                move_features[5] * norm_defensive +
+                move_features[1] * norm_tiles +
+                move_features[2] * norm_bingo_potential +
+                move_features[3] * norm_setup + 
+                move_features[4] * norm_defensive +
+                move_features[5] * norm_endgame +
                 move_features[6]
             )
 
             # # debug
             # print(f"norm_score: {norm_score} | original: {score_value}\nnorm_tiles: {norm_tiles} | original: {tiles_used}\nnorm_bingo_potential: {norm_bingo_potential} | original: {bingo_potential}\nnorm_setup: {norm_setup} | original: {setup_value}\nnorm_defensive: {norm_defensive} | original: {defensive_value}\nmove_value: {move_value}\nmove_features[0]: {move_features[0]}\nmove_features[1]: {move_features[1]}\nmove_features[2]: {move_features[2]}\nmove_features[3]: {move_features[3]}\nmove_features[4]: {move_features[4]}\nmove_features[5]: {move_features[5]}\nmove_features[6]: {move_features[6]}\n")
             
+            # # debug
+            # if episode_num >= self.log_eval_start_episode:
+            #     log_entry = {
+            #         'episode': episode_num,
+            #         'player_id': player_id,
+            #         'move_word': move.get('word', None),
+            #         'original_score': score_value,
+            #         'original_tiles_used': tiles_used,
+            #         'original_bingo_potential': bingo_potential,
+            #         'original_setup_value': setup_value,
+            #         'original_defensive_value': defensive_value,
+            #         'original_endgame_value': endgame_value,
+            #         'calculated_move_value': move_value,
+            #         'weight_score': move_features[0],
+            #         'weight_tiles_used': move_features[1],
+            #         'weight_bingo_potential': move_features[2],
+            #         'weight_setup_value': move_features[3],
+            #         'weight_defensive_value': move_features[4],
+            #         'weight_endgame': move_features[5],
+            #         'weight_bias': move_features[6]
+            #     }
+            #     self.move_evaluation_log.append(log_entry)
+
             if move_value > best_value:
                 best_value = move_value
                 best_move = move
         
         return best_move
-    
-    # def replay(self, batch_size):
-    #     """
-    #     Train model using experience replay
-        
-    #     Args:
-    #         batch_size: Number of experiences to sample
-    #     """
-    #     if len(self.memory) < batch_size:
-    #         return
-        
-    #     minibatch = random.sample(self.memory, batch_size)
 
-    #     for state, action_idx, reward, next_state, done in minibatch:
-    #         board_state = np.expand_dims(state['board'], axis=0)
-    #         hand_state = np.expand_dims(state['hand'], axis=0)
-    #         unseen_state = np.expand_dims(state['unseen'], axis=0)
-    #         game_features = np.expand_dims(state['game_features'], axis=0)
-
-    #         target_q = np.zeros_like(self.model.predict([board_state, hand_state, unseen_state, game_features], verbose=0)[0])
-
-    #         if done:
-    #             target_q[:] = reward
-    #         else:
-    #             next_board = np.expand_dims(next_state['board'], axis=0)
-    #             next_hand = np.expand_dims(next_state['hand'], axis=0)
-    #             next_unseen = np.expand_dims(next_state['unseen'], axis=0)
-    #             next_game_features = np.expand_dims(next_state['game_features'], axis=0)
-
-    #             next_q_values = self.target_model.predict(
-    #                 [next_board, next_hand, next_unseen, next_game_features],
-    #                 verbose=0
-    #             )[0]
-    #             target_q = reward + self.gamma * next_q_values
-
-    #         current_q_values = self.model.predict(
-    #             [board_state, hand_state, unseen_state, game_features],
-    #             verbose=0
-    #         )
-
-    #         target_f = current_q_values[0]
-    #         target_f[:] = target_q
-
-    #         self.model.fit(
-    #             [board_state, hand_state, unseen_state, game_features],
-    #             np.expand_dims(target_f, axis=0),
-    #             epochs=1, verbose=0
-    #         )
-        
-    #     if self.epsilon > self.epsilon_min:
-    #         self.epsilon *= self.epsilon_decay
 
     def replay(self, batch_size):
         """

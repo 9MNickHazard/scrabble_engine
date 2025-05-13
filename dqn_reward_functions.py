@@ -3,7 +3,7 @@ from collections import Counter
 from dqn_state import ScrabbleDQNState
 
 class ScrabbleDQNReward:
-    def __init__(self, win_reward=500.0, loss_penalty=-500.0, draw_reward=10.0):
+    def __init__(self, win_reward=200.0, loss_penalty=-200.0, draw_reward=10.0):
         self.win_reward = win_reward
         self.loss_penalty = loss_penalty
         self.draw_reward = draw_reward
@@ -15,7 +15,7 @@ class ScrabbleDQNReward:
             '_': 0
         }
         
-    def calculate_reward(self, game_state, player_id, move, next_game_state=None):
+    def calculate_reward(self, game_state, player_id, move, top_move_score, next_game_state=None):
         """
         Calculate the reward for a move considering:
         1. Immediate score from the move
@@ -36,6 +36,8 @@ class ScrabbleDQNReward:
         """
         reward = 0.0
 
+        state = self.state_encoder.get_state_representation(game_state, player_id)
+
         # immediate score
         if move and 'score' in move:
             immediate_score = move['score']
@@ -52,22 +54,31 @@ class ScrabbleDQNReward:
                 reward += tile_usage_reward
             else:
                 print(f"Warning: calculate_tile_usage_reward returned None.")
-        
-        # kept tiles for bingo potential
-        if move:
-            bingo_potential_reward = self.calculate_bingo_potential_reward(move, game_state, player_id)
-            if bingo_potential_reward is not None:
-                reward += bingo_potential_reward
-            else:
-                print(f"Warning: calculate_bingo_potential_reward returned None.")
 
-        # played positions for defensive reward
+        # played positions for defensive & bingo potential rewards
         played_positions = []
         if move and 'positions' in move:
             for pos in move['positions']:
                 if pos in game_state.is_tile_present:
                     if not game_state.is_tile_present[pos][0]:
                         played_positions.append(pos)
+
+        # kept tiles for bingo potential, only apply if there are no bingos and enough tiles to draw in the bag. 56 points is the lowest amount of points possible when bingoing
+        player_hand_before_move = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
+
+        hand_size_after_play_before_draw = len(player_hand_before_move) - len(played_positions)
+
+        num_in_bag_before_this_turns_draw = sum(game_state.letter_counts.values())
+
+        tiles_needed_to_refill = max(0, 7 - hand_size_after_play_before_draw)
+
+        if top_move_score < 56 and (tiles_needed_to_refill == 0 or num_in_bag_before_this_turns_draw >= tiles_needed_to_refill):
+            if move:
+                bingo_potential_reward = self.calculate_bingo_potential_reward(move, game_state, player_id)
+                if bingo_potential_reward is not None:
+                    reward += bingo_potential_reward
+                else:
+                    print(f"Warning: calculate_bingo_potential_reward returned None.")
             
         # setup value reward
         if move:
@@ -76,9 +87,13 @@ class ScrabbleDQNReward:
             
         # defensive play reward
         if move and played_positions:
-            state = self.state_encoder.get_state_representation(game_state, player_id)
             defensive_reward = self.calculate_defensive_value(game_state, move, played_positions, state['unseen'])
             reward += defensive_reward
+        
+        # endgame reward
+        if num_in_bag_before_this_turns_draw <= 7:
+            endgame_reward = self.calculate_endgame_strategy_reward(game_state, player_id, move, next_game_state, state)
+            reward += endgame_reward
 
         # game outcome
         if next_game_state and next_game_state.game_over:
@@ -115,7 +130,7 @@ class ScrabbleDQNReward:
         if tiles_used == 7:
             return 50.0
         else:
-            return 5.0
+            return 1.0 * tiles_used
     
     
     def calculate_outcome_reward(self, game_state, player_id):
@@ -171,15 +186,11 @@ class ScrabbleDQNReward:
                         hand_after_move.remove('_')
         
         bingo_potential = self._evaluate_bingo_potential(hand_after_move, unseen_vector)
-        
-        if move['score'] < 30:
-            # # debug
-            # print(f"VAR bingo_potential | FUNC calculate_bingo_potential_reward (move was LESS than 30 points): {bingo_potential * 3.0}")
-            return bingo_potential * 3.0
-        else:
-            # # debug
-            # print(f"VAR bingo_potential | FUNC calculate_bingo_potential_reward (move was GREATER than 30 points): {bingo_potential * 0.5}")
-            return bingo_potential * 0.5
+
+        # # debug
+        # print(f"VAR bingo_potential | FUNC calculate_bingo_potential_reward: {bingo_potential}")
+        return bingo_potential
+
     
     def _evaluate_bingo_potential(self, hand, unseen_vector):
         """
@@ -197,7 +208,7 @@ class ScrabbleDQNReward:
         consonants = {'b', 'c', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm', 
                     'n', 'p', 'q', 'r', 's', 't', 'v', 'w', 'x', 'y', 'z'}
         
-        one_point_tiles = {'a', 'e', 'i', 'o', 'n', 'r', 's', 't', 'l'}
+        one_point_tiles = {'a', 'e', 'i', 'o', 'u', 'n', 'r', 's', 't', 'l'}
         unique_one_point_count = len(set(t for t in hand if t in one_point_tiles))
         
         blank_count = hand.count('_')
@@ -221,7 +232,7 @@ class ScrabbleDQNReward:
             letter_counts[letter] = letter_counts.get(letter, 0) + 1
         
         good_duplicates = {
-            'e': 3,
+            'e': 2,
             's': 2,
             'a': 2, 
             'i': 2,
@@ -301,7 +312,7 @@ class ScrabbleDQNReward:
             set: Letters that would be most helpful
         """
         vowels = {'a', 'e', 'i', 'o', 'u'}
-        one_point_tiles = {'a', 'e', 'i', 'o', 'n', 'r', 's', 't', 'l'}
+        one_point_tiles = {'a', 'e', 'i', 'o', 'u', 'n', 'r', 's', 't', 'l'}
         needed_letters = set()
         
         if vowel_count < 2:
@@ -318,7 +329,7 @@ class ScrabbleDQNReward:
                     needed_letters.add(c)
         
         if 2 <= vowel_count <= 3 and 3 <= consonant_count <= 5:
-            high_value_useful = {'d', 'g', 'p'}
+            high_value_useful = {'b', 'c', 'd', 'g', 'h', 'm', 'p'}
             for c in high_value_useful:
                 if c not in letter_counts or letter_counts[c] == 0:
                     needed_letters.add(c)
@@ -777,3 +788,127 @@ class ScrabbleDQNReward:
                             value += square_value * 0.5
         
         return value
+    
+
+
+    def calculate_endgame_strategy_reward(self, game_state, player_id, move, next_game_state, encoded_state):
+        """
+        Calculate reward for endgame strategy, focusing on playing out,
+        minimizing rack penalty, and strategic tile management when bag is low.
+        
+        Args:
+            game_state: Current game state before the move
+            player_id: ID of the player making the move (1 or 2)
+            move: The move being evaluated
+            next_game_state: Game state after the move
+            
+        Returns:
+            float: Calculated endgame strategy reward
+        """
+        reward = 0.0
+        tiles_in_bag = sum(game_state.letter_counts.values())
+        
+        is_endgame = tiles_in_bag <= 7
+        
+        if not is_endgame and not (next_game_state and next_game_state.game_over):
+            return 0.0
+        
+        if move is None:
+            if next_game_state and next_game_state.game_over:
+                player_hand_final = next_game_state.player_1_hand if player_id == 1 else next_game_state.player_2_hand
+                opponent_hand_final = next_game_state.player_2_hand if player_id == 1 else next_game_state.player_1_hand
+                
+                player_rack_value = sum(self.letter_point_values.get(t.lower(), 0) for t in player_hand_final)
+                opponent_rack_value = sum(self.letter_point_values.get(t.lower(), 0) for t in opponent_hand_final)
+                
+                if not player_hand_final:
+                    reward += 20.0
+                    reward += opponent_rack_value * 2
+                else:
+                    reward -= player_rack_value
+                    
+                    if not opponent_hand_final:
+                        reward -= player_rack_value
+
+            return reward
+        
+        tiles_played_from_hand = 0
+        if 'positions' in move:
+            for pos in move['positions']:
+                if not game_state.is_tile_present[pos][0]:
+                    tiles_played_from_hand += 1
+        
+        # playing out bonus
+        if next_game_state and next_game_state.game_over:
+            player_hand_after = next_game_state.player_1_hand if player_id == 1 else next_game_state.player_2_hand
+            
+            if not player_hand_after:
+                reward += 20.0
+                
+                opponent_hand_after = next_game_state.player_2_hand if player_id == 1 else next_game_state.player_1_hand
+                opponent_rack_value = sum(self.letter_point_values.get(t.lower(), 0) for t in opponent_hand_after)
+                reward += opponent_rack_value * 2  # Double bonus as per Scrabble rules
+        
+        # opponent rack penalty
+        if tiles_in_bag == 0 and tiles_played_from_hand > 0:
+            reward += tiles_played_from_hand * 3.0
+            
+            unseen_vector = encoded_state['unseen']
+            
+            opponent_penalty = 0
+
+            for i in range(27):
+                if unseen_vector[i] > 0:
+                    if i == 26:
+                        continue
+                    letter = chr(ord('a') + i)
+                    point_value = self.letter_point_values[letter]
+                    opponent_penalty += unseen_vector[i] * point_value
+            
+            if opponent_penalty > 10:
+                reward += 6.0
+            elif opponent_penalty > 5:
+                reward += 3.0
+        
+        # score maximization
+        if tiles_in_bag < 7 and move and 'score' in move:
+            if tiles_played_from_hand > 0:
+                score_efficiency = move['score'] / tiles_played_from_hand
+            if score_efficiency > 10:
+                reward += move['score'] * 0.3
+            else:
+                reward += move['score'] * 0.15
+        
+        # blocking opponent going out
+        if tiles_in_bag == 0:
+            premium_squares_blocked = 0
+            if 'positions' in move:
+                for pos in move['positions']:
+                    if not game_state.is_tile_present[pos][0]:
+                        special = game_state.special_spaces.get(pos)
+                        if special in ['triple_word', 'triple_letter', 'double_word']:
+                            premium_squares_blocked += 1
+            
+            if premium_squares_blocked > 0:
+                unseen_tiles_count = encoded_state['unseen'].sum()
+                
+                if unseen_tiles_count <= 3:
+                    reward += premium_squares_blocked * 5.0
+                elif unseen_tiles_count <= 5:
+                    reward += premium_squares_blocked * 2.0
+        
+        # efficient tile usage
+        if tiles_in_bag < 3:
+            if tiles_played_from_hand >= 5:
+                reward += 10.0
+            elif tiles_played_from_hand >= 3:
+                reward += 5.0
+            
+            current_hand = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
+            if len(current_hand) >= 6 and tiles_played_from_hand < 2:
+                reward -= 5.0
+        
+        # debug
+        print(f'Endgame reward: {reward}')
+
+        return reward

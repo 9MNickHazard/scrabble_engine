@@ -659,6 +659,10 @@ class Scrabble_Game:
         
         self.player_1_score -= p1_penalty
         self.player_2_score -= p2_penalty
+
+        if len(self.player_1_hand) == 0 or len(self.player_2_hand) == 0:
+            self.player_1_score += p2_penalty
+            self.player_2_score += p1_penalty
         
         move_data = {
             'type': 'game_over',
@@ -713,6 +717,9 @@ class Scrabble_Game:
 
             move['player_id'] = player_id
             move['score'] = int(move.get('score', 0))
+        
+        # # debug
+        # print(valid_moves)
 
 
         return valid_moves

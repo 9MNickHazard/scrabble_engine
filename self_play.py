@@ -4,7 +4,9 @@ import numpy as np
 import random
 import os
 from collections import deque
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
+
+import pandas as pd
 
 class ScrabbleSelfPlay:
     def __init__(self, game_api_class, state_encoder, reward_calculator, 
@@ -61,12 +63,17 @@ class ScrabbleSelfPlay:
                     # print(f"Unseen tiles (Player 1's view): {state['unseen']}")
                     
                     valid_moves = game.get_all_valid_moves(1)
+
+                    if len(valid_moves) > 0:
+                        top_move_score1 = valid_moves[0]['score']
+                    else:
+                        top_move_score1 = 0
                     
                     if not valid_moves:
                         game.pass_turn(1)
                         continue
                     
-                    move = agent1.act(state, valid_moves, self.reward_calculator, game, 1)
+                    move = agent1.act(state, valid_moves, self.reward_calculator, game, 1, episode)
                     
                     game_before = copy.deepcopy(game)
                     
@@ -78,7 +85,7 @@ class ScrabbleSelfPlay:
                     
                     next_state = self.state_encoder.get_state_representation(game, 1)
                     
-                    reward = self.reward_calculator.calculate_reward(game_before, 1, move, game)
+                    reward = self.reward_calculator.calculate_reward(game_before, 1, move, top_move_score1, game)
                     episode_reward1 += reward
                     
                     agent1.remember(state, 0, reward, next_state, game.game_over)
@@ -95,12 +102,17 @@ class ScrabbleSelfPlay:
                     # print(f"Unseen tiles (Player 2's view): {state['unseen']}")
                     
                     valid_moves = game.get_all_valid_moves(2)
+
+                    if len(valid_moves) > 0:
+                        top_move_score2 = valid_moves[0]['score']
+                    else:
+                        top_move_score2 = 0
                     
                     if not valid_moves:
                         game.pass_turn(2)
                         continue
                     
-                    move = agent2.act(state, valid_moves, self.reward_calculator, game, 2)
+                    move = agent2.act(state, valid_moves, self.reward_calculator, game, 2, episode)
                     
                     game_before = copy.deepcopy(game)
                     
@@ -112,7 +124,7 @@ class ScrabbleSelfPlay:
                     
                     next_state = self.state_encoder.get_state_representation(game, 2)
                     
-                    reward = self.reward_calculator.calculate_reward(game_before, 2, move, game)
+                    reward = self.reward_calculator.calculate_reward(game_before, 2, move, top_move_score2, game)
                     episode_reward2 += reward
                     
                     agent2.remember(state, 0, reward, next_state, game.game_over)
@@ -124,8 +136,8 @@ class ScrabbleSelfPlay:
                 
                 episode_length += 1
 
-                # # debug
-                # print(f"Episode {episode+1}/{num_episodes}, Turn {episode_length}")
+                # debug
+                print(f'Turn: {episode_length}')
             
             if episode % target_update_freq == 0:
                 agent1.update_target_model()
@@ -162,5 +174,20 @@ class ScrabbleSelfPlay:
         
         agent1.save(f"{self.model_dir}/agent1_final.weights.h5")
         agent2.save(f"{self.model_dir}/agent2_final.weights.h5")
+
+        # # debug
+        # log_file_name = "move_evaluation_log_last30epsof200.csv"
+        # combined_log_data = agent1.move_evaluation_log
+        # if combined_log_data:
+        #     try:
+        #         print(f"Creating DataFrame from {len(combined_log_data)} log entries...")
+        #         df_eval = pd.DataFrame(combined_log_data)
+        #         save_path = os.path.join(self.log_dir, log_file_name)
+        #         df_eval.to_csv(save_path, index=False)
+        #         print(f"Move evaluation log saved to {save_path}")
+        #     except Exception as e:
+        #         print(f"Error creating or saving evaluation log DataFrame: {e}")
+        # else:
+        #     print("Move evaluation log is empty. No CSV file saved.")
         
         return self.stats
