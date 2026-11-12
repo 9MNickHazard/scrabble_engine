@@ -1,0 +1,7 @@
+CAT a small feline [n CATS]
+cats
+  dog   a domestic canine
+
+At
+ZOO a place to see animals
+cat duplicate line

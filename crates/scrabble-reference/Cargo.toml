@@ -1,0 +1,9 @@
+[package]
+name = "scrabble-reference"
+description = "Deliberately simple brute-force Scrabble rules and move finder, used only to test scrabble-core."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

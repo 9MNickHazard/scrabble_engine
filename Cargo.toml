@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/scrabble-core", "crates/scrabble-reference", "crates/scrabble-py"]
+# The Python extension links against Python; plain `cargo test` leaves it out.
+default-members = ["crates/scrabble-core", "crates/scrabble-reference"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Tests and benches of the engine are only meaningful with optimizations on.
+[profile.test]
+opt-level = 3
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1
