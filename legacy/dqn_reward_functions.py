@@ -46,15 +46,6 @@ class ScrabbleDQNReward:
             else:
                 print(f"Warning: Move received with 'score': None. Move: {move}")
 
-
-        # tile usage
-        if move:
-            tile_usage_reward = self.calculate_tile_usage_reward(move, game_state)
-            if tile_usage_reward is not None:
-                reward += tile_usage_reward
-            else:
-                print(f"Warning: calculate_tile_usage_reward returned None.")
-
         # played positions for defensive & bingo potential rewards
         played_positions = []
         if move and 'positions' in move:
@@ -62,6 +53,18 @@ class ScrabbleDQNReward:
                 if pos in game_state.is_tile_present:
                     if not game_state.is_tile_present[pos][0]:
                         played_positions.append(pos)
+        
+        num_tiles_played_from_hand = len(played_positions)
+        is_bingo_played = (num_tiles_played_from_hand == 7)
+
+        # tile usage
+        if move:
+            if is_bingo_played:
+                tile_usage_reward = 50.0
+            else:
+                tile_usage_reward = 1.0 * num_tiles_played_from_hand
+            reward += tile_usage_reward
+        
 
         # kept tiles for bingo potential, only apply if there are no bingos and enough tiles to draw in the bag. 56 points is the lowest amount of points possible when bingoing
         player_hand_before_move = game_state.player_1_hand if player_id == 1 else game_state.player_2_hand
@@ -83,17 +86,17 @@ class ScrabbleDQNReward:
         # setup value reward
         if move:
             setup_reward = self.calculate_setup_value(game_state, move, player_id)
-            reward += setup_reward
+            reward += setup_reward * (0.5 if is_bingo_played else 1.0)
             
         # defensive play reward
         if move and played_positions:
             defensive_reward = self.calculate_defensive_value(game_state, move, played_positions, state['unseen'])
-            reward += defensive_reward
+            reward += defensive_reward * (0.5 if is_bingo_played else 1.0)
         
         # endgame reward
         if num_in_bag_before_this_turns_draw <= 7:
             endgame_reward = self.calculate_endgame_strategy_reward(game_state, player_id, move, next_game_state, state)
-            reward += endgame_reward
+            reward += endgame_reward * (0.5 if is_bingo_played else 1.0)
 
         # game outcome
         if next_game_state and next_game_state.game_over:

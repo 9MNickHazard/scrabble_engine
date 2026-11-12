@@ -1,0 +1,6 @@
+# Store and check out text with LF everywhere, whatever core.autocrlf says.
+* text=auto eol=lf
+
+# Legacy files are kept byte-for-byte as they were (PROVENANCE.md records their hashes).
+legacy/** -text
+legacy/PROVENANCE.md text eol=lf

@@ -1,0 +1,54 @@
+# --- Never commit: data, word lists, weights, runs, keys ---------------------
+# Word lists are copyrighted (NASPA / Collins). They live in data/lexicon/.
+data/
+runs/
+NSWL*.txt
+NWL*.txt
+CSW*.txt
+word_dictionary*.csv
+
+# Model weights, checkpoints, pickles, cached arrays, compiled lexicons
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.gaddag
+*.kwg
+
+# Keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+
+# --- Build output and environments -----------------------------------------
+.venv/
+venv*/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+target/
+
+# --- Editors, notebooks, OS -------------------------------------------------
+.ipynb_checkpoints/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# --- Local-only notes --------------------------------------------------------
+CLAUDE.local.md
+docs/handoff-brief.md

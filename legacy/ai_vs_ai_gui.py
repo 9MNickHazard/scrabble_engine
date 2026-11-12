@@ -13,6 +13,8 @@ from dqn_reward_functions import ScrabbleDQNReward
 from dqn_model import ScrabbleDQN
 import pygame
 from PIL import Image, ImageTk
+import pandas as pd
+import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -76,6 +78,11 @@ class ScrabbleAIvsAIGUI:
         self.autoplay_job_id = None
         
         self.current_top_moves = []
+
+        self.num_games = 10  # Default number of games to play
+        self.games_played = 0
+        self.auto_continue = False
+        self.game_results = []
 
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -157,6 +164,19 @@ class ScrabbleAIvsAIGUI:
         self.top_moves_list.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self.multi_game_frame = ttk.LabelFrame(self.control_frame, text="Multi-Game Settings", padding="10")
+        self.multi_game_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(self.multi_game_frame, text="Number of Games:").grid(row=0, column=0, sticky="w", pady=2)
+        self.num_games_var = tk.StringVar(value="10")
+        self.num_games_entry = ttk.Entry(self.multi_game_frame, textvariable=self.num_games_var)
+        self.num_games_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        
+        self.multi_game_btn = ttk.Button(self.multi_game_frame, text="Play Multiple Games", command=self.start_multi_game)
+        self.multi_game_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        self.multi_game_frame.columnconfigure(1, weight=1)
+
         self.main_frame.columnconfigure(1, weight=1)
 
     def create_info_panel(self):
@@ -190,10 +210,16 @@ class ScrabbleAIvsAIGUI:
 
         self.main_frame.rowconfigure(1, weight=1)
 
-    def initialize_game(self):
+    def initialize_game(self, suppress_messages=False):
         if self.autoplay_job_id:
             self.root.after_cancel(self.autoplay_job_id)
             self.autoplay_job_id = None
+        
+        if not self.auto_continue:
+            self.autoplay = False
+            self.paused = False
+            self.start_autoplay_btn.config(text="Start AI vs AI Game")
+            self.pause_btn.config(text="Pause", state=tk.DISABLED)
         
         self.autoplay = False
         self.paused = False
@@ -211,7 +237,11 @@ class ScrabbleAIvsAIGUI:
         self.update_top_moves_display()
 
         self.game_log.delete(1.0, tk.END)
-        self.log_game_event("New game initialized. Ready to start AI vs AI game.")
+
+        if not suppress_messages:
+            self.log_game_event("New game initialized. Ready to start AI vs AI game.")
+        else:
+            self.log_game_event(f"Game {self.games_played + 1}/{self.num_games} initialized")
 
         self.update_button_states()
 
@@ -402,31 +432,36 @@ class ScrabbleAIvsAIGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
 
-    def toggle_autoplay(self):
+    def toggle_autoplay(self, auto_continue=False):
         if not self.autoplay:
             if not self.dqn_agent1 or not self.dqn_agent2:
                 messagebox.showerror("Error", "Both AI models must be loaded before starting autoplay")
                 return
-                
+            
             self.autoplay = True
             self.paused = False
             self.start_autoplay_btn.config(text="Stop AI vs AI Game")
             self.pause_btn.config(text="Pause", state=tk.NORMAL)
             
-            self.log_game_event("Starting AI vs AI autoplay")
+            if not auto_continue:
+                self.log_game_event("Starting AI vs AI autoplay")
             
             self.autoplay_job_id = self.root.after(self.autoplay_speed, self.auto_play_move)
         else:
             self.autoplay = False
             self.paused = False
+            self.auto_continue = False  # Stop series of games
             self.start_autoplay_btn.config(text="Start AI vs AI Game")
             self.pause_btn.config(text="Pause", state=tk.DISABLED)
             
             if self.autoplay_job_id:
                 self.root.after_cancel(self.autoplay_job_id)
                 self.autoplay_job_id = None
-                
+            
             self.log_game_event("Stopped AI vs AI autoplay")
+            
+            # Save move logs when stopping
+            self.save_move_logs()
 
     def pause_resume_game(self):
         if not self.autoplay:
@@ -529,27 +564,51 @@ class ScrabbleAIvsAIGUI:
         self.game_log.see(tk.END)
 
     def handle_game_over(self):
-        self.autoplay = False
+        if not self.auto_continue:
+            self.autoplay = False
+        
         if self.autoplay_job_id:
             self.root.after_cancel(self.autoplay_job_id)
             self.autoplay_job_id = None
-            
-        self.start_autoplay_btn.config(text="Start Game")
-        self.pause_btn.config(state=tk.DISABLED)
         
-        self.log_game_event("Game Over!")
+        winner = "AI 1 (P1)" if self.game.player_1_score > self.game.player_2_score else \
+                "AI 2 (P2)" if self.game.player_1_score < self.game.player_2_score else \
+                "Tie"
+        
+        # Record game result
+        game_result = {
+            'game_number': self.games_played + 1,
+            'player1_score': self.game.player_1_score,
+            'player2_score': self.game.player_2_score,
+            'winner': winner
+        }
+        self.game_results.append(game_result)
+        
+        self.log_game_event(f"Game {self.games_played + 1} Over!")
         self.log_game_event(f"Final scores: AI 1: {self.game.player_1_score}, AI 2: {self.game.player_2_score}")
-
-        if self.game.player_1_score > self.game.player_2_score:
-            winner = "AI 1 (P1)"
-        elif self.game.player_1_score < self.game.player_2_score:
-            winner = "AI 2 (P2)"
-        else:
-            winner = "It's a tie!"
-
         self.log_game_event(f"Winner: {winner}")
-
-        messagebox.showinfo("Game Over", f"Game over!\nFinal scores:\nAI 1: {self.game.player_1_score}\nAI 2: {self.game.player_2_score}\n\nWinner: {winner}")
+        
+        self.games_played += 1
+        
+        # Continue to next game if in multi-game mode
+        if self.auto_continue and self.games_played < self.num_games:
+            # Simplify the transition to avoid timing issues
+            self.root.after(1000, self.start_next_game)
+        else:
+            # All games finished or stopped - now save the logs
+            if self.auto_continue:
+                self.log_game_event(f"Completed all {self.num_games} games")
+                self.save_series_results()
+                self.save_move_logs()  # Save all move logs at the end of series
+            
+            self.auto_continue = False
+            self.autoplay = False
+            self.start_autoplay_btn.config(text="Start AI vs AI Game")
+            self.pause_btn.config(state=tk.DISABLED)
+            
+            # Only show message box if not in auto-continue mode
+            if not self.auto_continue and not self.paused:
+                messagebox.showinfo("Game Over", f"Game over!\nFinal scores:\nAI 1: {self.game.player_1_score}\nAI 2: {self.game.player_2_score}\n\nWinner: {winner}")
 
     def show_instructions(self):
         instructions = """
@@ -599,6 +658,105 @@ class ScrabbleAIvsAIGUI:
         """
 
         messagebox.showinfo("About", about_text)
+    
+    def save_move_logs(self):
+        if not self.dqn_agent1 or not self.dqn_agent2:
+            print("No AI models loaded, skipping log save")
+            return
+        
+        logs1 = getattr(self.dqn_agent1, 'move_evaluation_log', [])
+        logs2 = getattr(self.dqn_agent2, 'move_evaluation_log', [])
+        
+        combined_logs = logs1 + logs2
+        
+        if not combined_logs:
+            print("No move evaluation logs available")
+            return
+        
+        try:
+            df = pd.DataFrame(combined_logs)
+            df.to_csv("norm_values_debug.csv", index=False)
+            print(f"Move evaluation logs saved to norm_values_debug.csv")
+        except Exception as e:
+            print(f"Failed to save logs: {str(e)}")
+    
+    def start_multi_game(self):
+        if not self.dqn_agent1 or not self.dqn_agent2:
+            messagebox.showerror("Error", "Both AI models must be loaded before starting")
+            return
+        
+        try:
+            self.num_games = int(self.num_games_var.get())
+            if self.num_games <= 0:
+                raise ValueError("Number of games must be positive")
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid number of games: {e}")
+            return
+        
+        self.games_played = 0
+        self.game_results = []
+        self.auto_continue = True
+        
+        # Clear existing move logs at the start of a new series
+        if hasattr(self.dqn_agent1, 'move_evaluation_log'):
+            self.dqn_agent1.move_evaluation_log = []
+        if hasattr(self.dqn_agent2, 'move_evaluation_log'):
+            self.dqn_agent2.move_evaluation_log = []
+        
+        self.log_game_event(f"Starting series of {self.num_games} games")
+        
+        # Initialize first game and start
+        self.initialize_game(suppress_messages=True)
+        self.autoplay = True
+        self.paused = False
+        self.start_autoplay_btn.config(text="Stop AI vs AI Games")
+        self.pause_btn.config(text="Pause", state=tk.NORMAL)
+        
+        self.autoplay_job_id = self.root.after(self.autoplay_speed, self.auto_play_move)
+    
+    def save_series_results(self):
+        if not self.game_results:
+            return
+        
+        try:
+            df = pd.DataFrame(self.game_results)
+            filename = "game_series_results.csv"
+            df.to_csv(filename, index=False)
+            print(f"Game series results saved to {filename}")
+            
+            # Calculate statistics
+            total_games = len(self.game_results)
+            p1_wins = sum(1 for game in self.game_results if game['winner'] == "AI 1 (P1)")
+            p2_wins = sum(1 for game in self.game_results if game['winner'] == "AI 2 (P2)")
+            ties = sum(1 for game in self.game_results if game['winner'] == "Tie")
+            
+            p1_avg_score = sum(game['player1_score'] for game in self.game_results) / total_games
+            p2_avg_score = sum(game['player2_score'] for game in self.game_results) / total_games
+            
+            summary = (
+                f"Series Summary:\n"
+                f"Total Games: {total_games}\n"
+                f"AI 1 Wins: {p1_wins} ({p1_wins/total_games*100:.1f}%)\n"
+                f"AI 2 Wins: {p2_wins} ({p2_wins/total_games*100:.1f}%)\n"
+                f"Ties: {ties} ({ties/total_games*100:.1f}%)\n"
+                f"AI 1 Avg Score: {p1_avg_score:.1f}\n"
+                f"AI 2 Avg Score: {p2_avg_score:.1f}"
+            )
+            
+            self.log_game_event(summary)
+        except Exception as e:
+            print(f"Failed to save series results: {str(e)}")
+    
+    def start_next_game(self):
+        """Helper method to start the next game in a multi-game series"""
+        self.initialize_game(suppress_messages=True)
+        
+        self.autoplay = True
+        self.paused = False
+        
+        self.autoplay_job_id = self.root.after(self.autoplay_speed, self.auto_play_move)
+        
+        self.log_game_event(f"Starting game {self.games_played + 1}/{self.num_games}")
 
 def main():
     root = tk.Tk()
