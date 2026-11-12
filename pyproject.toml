@@ -1,0 +1,54 @@
+[project]
+name = "scrabble-ai"
+version = "0.1.0"
+description = "Scrabble engine and deep RL move evaluator (afterstate value learning), trained locally."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.0",
+    "tensorboard>=2.18",
+    "torch>=2.15,<2.16",
+]
+
+[project.scripts]
+scrabble-ai = "scrabble_ai.cli:main"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2",
+    "pytest>=8",
+]
+
+# The RTX 5070 Ti is Blackwell (sm_120) and needs a CUDA 12.8+ build of PyTorch.
+# pytorch.org's Windows pip command for 2.15.0 uses the cu132 index (checked 2026-11-12).
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+# The package is Python (src/scrabble_ai) plus a Rust extension (crates/scrabble-py), built by maturin.
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "crates/scrabble-py/Cargo.toml"
+module-name = "scrabble_ai._core"
+python-source = "src"
+profile = "release"
+
+# Rebuild the extension on `uv sync` / `uv run` when the Rust sources change.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "crates/**/*.rs" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

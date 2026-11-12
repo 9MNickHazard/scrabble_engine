@@ -1,0 +1,217 @@
+"""Training configuration.
+
+Every setting that affects training lives here as a dataclass field with its default.
+`configs/train.toml` lists the same settings with explanations; a config file only needs the
+values it changes. Unknown sections or keys are errors, so a typo cannot silently do nothing.
+
+Ways to change a setting, later ones winning:
+    1. the default below
+    2. the TOML file passed with --config
+    3. --set section.key=value on the command line (repeatable)
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass
+class RunConfig:
+    name: str = "run"  # outputs go to <out_dir>/<name>/
+    out_dir: str = "runs"
+    lexicon: str = ""  # a name from configs/lexicons.toml; empty = that file's default
+    leaves: str = ""  # leave-value file; empty = data/leaves/<lexicon id>.leaves
+    seed: int = 1  # fixes self-play game seeds and all sampling
+    hours: float = 0.0  # stop after this much wall-clock time (0 = no time limit)
+    max_games: int = 0  # stop after this many self-play games (0 = no limit)
+    device: str = "cuda"
+    vram_fraction: float = 0.9  # cap on PyTorch's share of GPU memory (Windows spills silently otherwise)
+
+
+@dataclass
+class ModelConfig:
+    blocks: int = 6  # residual blocks
+    channels: int = 64  # channels per block
+    norm: str = "none"  # "none" (residual scaling, no normalization) or "group" (GroupNorm)
+    vector_hidden: int = 128  # width of the MLP over the non-board features
+    head_hidden: int = 256  # width of the layer before the value and win outputs
+    value_channels: int = 8  # 1x1 conv channels flattened into the head (keeps positions)
+    cross_checks: bool = True  # feed the cross-check planes (which letters fit on each square)
+    leave_baseline: bool = True  # network predicts a correction to the static leave value
+
+
+@dataclass
+class SelfPlayConfig:
+    games: int = 256  # games played in lockstep
+    max_candidates: int = 64  # moves per decision sent to the network (top by score + leave value)
+    max_exchanges: int = 4  # of which at most this many are exchanges
+    temperature_start: float = 4.0  # softmax temperature over move values, in points, at game 0
+    temperature_end: float = 0.5  # temperature after temperature_decay_games
+    temperature_decay_games: int = 300_000  # self-play games over which the temperature anneals
+    win_weight: float = 0.0  # 0 = choose moves by expected spread only, 1 = by win probability only
+    win_scale: float = 100.0  # points that certain victory is worth when blending the two
+
+
+@dataclass
+class WarmStartConfig:
+    games: int = 100_000  # games played by the static evaluator before any network self-play (0 = skip)
+    temperature: float = 6.0  # softmax temperature over static values, so bad moves are seen too
+    max_candidates: int = 16
+    steps: int = 3_000  # training steps on that data before self-play starts
+
+
+@dataclass
+class TrainConfig:
+    batch_size: int = 2048
+    learning_rate: float = 1e-3
+    warmup_steps: int = 500  # linear learning-rate warm-up
+    weight_decay: float = 1e-4
+    grad_clip: float = 1.0  # max gradient norm (0 = off)
+    value_scale: float = 50.0  # points per unit of the value output
+    huber_delta: float = 2.0  # Huber loss transition, in value-output units
+    win_loss_weight: float = 0.5  # weight of the win-probability loss
+    td_lambda: float = 1.0  # 1 = Monte Carlo targets; below 1 mixes in the network's own later estimates
+    replay_capacity: int = 3_000_000  # positions kept (about 310 bytes each)
+    min_replay: int = 100_000  # positions needed before training starts
+    replay_ratio: float = 4.0  # training samples drawn per new self-play position
+    actor_sync_steps: int = 250  # training steps between copies of the weights into the self-play network
+    augment_transpose: bool = True  # randomly swap rows and columns (the only exact board symmetry)
+    amp: bool = True  # bf16 autocast
+    checkpoint_minutes: float = 10.0
+    eval_minutes: float = 20.0
+    eval_pairs: int = 250  # seat-swapped pairs per periodic evaluation against each baseline
+    gate_pairs: int = 500  # pairs when testing a checkpoint against the current best
+    keep_checkpoints: int = 5
+
+
+@dataclass
+class Config:
+    run: RunConfig = field(default_factory=RunConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
+    warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+
+    def to_dict(self) -> dict[str, dict[str, Any]]:
+        return dataclasses.asdict(self)
+
+    def validate(self) -> None:
+        checks = [
+            (self.model.norm in ("none", "group"), "model.norm must be 'none' or 'group'"),
+            (self.model.blocks >= 1 and self.model.channels >= 8, "model needs blocks >= 1 and channels >= 8"),
+            (self.model.channels % 8 == 0, "model.channels must be a multiple of 8"),
+            (self.selfplay.games >= 1, "selfplay.games must be at least 1"),
+            (2 <= self.selfplay.max_candidates <= 512, "selfplay.max_candidates must be between 2 and 512"),
+            (0 <= self.selfplay.max_exchanges < self.selfplay.max_candidates, "selfplay.max_exchanges must be below max_candidates"),
+            (0.0 <= self.selfplay.win_weight <= 1.0, "selfplay.win_weight must be between 0 and 1"),
+            (self.selfplay.temperature_start >= 0 and self.selfplay.temperature_end >= 0, "temperatures cannot be negative"),
+            (0.0 <= self.train.td_lambda <= 1.0, "train.td_lambda must be between 0 and 1"),
+            (self.train.batch_size >= 1 and self.train.learning_rate > 0, "train.batch_size and learning_rate must be positive"),
+            (self.train.replay_capacity >= self.train.min_replay >= self.train.batch_size, "need replay_capacity >= min_replay >= batch_size"),
+            (self.train.value_scale > 0 and self.train.huber_delta > 0, "train.value_scale and huber_delta must be positive"),
+            (0.0 < self.run.vram_fraction <= 1.0, "run.vram_fraction must be in (0, 1]"),
+        ]
+        for ok, message in checks:
+            if not ok:
+                raise ConfigError(message)
+
+
+def _coerce(value: Any, target: type, where: str) -> Any:
+    """Check a TOML value against a field's type; ints are accepted for float fields."""
+    if target is float and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    if target is int and isinstance(value, bool):
+        raise ConfigError(f"{where}: expected a whole number, got {value!r}")
+    if not isinstance(value, target):
+        raise ConfigError(f"{where}: expected {target.__name__}, got {value!r}")
+    return value
+
+
+def _parse_scalar(text: str, target: type, where: str) -> Any:
+    """Parse a --set value for a field of the given type."""
+    try:
+        if target is bool:
+            if text.lower() in ("true", "1", "yes", "on"):
+                return True
+            if text.lower() in ("false", "0", "no", "off"):
+                return False
+            raise ValueError
+        if target is int:
+            return int(text.replace("_", ""))
+        if target is float:
+            return float(text.replace("_", ""))
+        return text
+    except ValueError:
+        raise ConfigError(f"{where}: cannot read {text!r} as {target.__name__}") from None
+
+
+_FIELD_TYPES = {"int": int, "float": float, "bool": bool, "str": str}
+
+
+def _field_type(section: Any, key: str) -> type:
+    for f in dataclasses.fields(section):
+        if f.name == key:
+            return _FIELD_TYPES[f.type] if isinstance(f.type, str) else f.type
+    raise KeyError(key)
+
+
+def apply_dict(config: Config, data: dict[str, Any]) -> None:
+    for section_name, values in data.items():
+        section = getattr(config, section_name, None)
+        if section is None or not dataclasses.is_dataclass(section):
+            known = ", ".join(f.name for f in dataclasses.fields(config))
+            raise ConfigError(f"unknown config section [{section_name}]; sections are: {known}")
+        if not isinstance(values, dict):
+            raise ConfigError(f"[{section_name}] must be a table of settings")
+        for key, value in values.items():
+            where = f"{section_name}.{key}"
+            try:
+                target = _field_type(section, key)
+            except KeyError:
+                known = ", ".join(f.name for f in dataclasses.fields(section))
+                raise ConfigError(f"unknown setting {where}; [{section_name}] has: {known}") from None
+            setattr(section, key, _coerce(value, target, where))
+
+
+def apply_overrides(config: Config, overrides: list[str]) -> None:
+    """Apply `section.key=value` strings from the command line."""
+    for item in overrides:
+        path, separator, text = item.partition("=")
+        section_name, dot, key = path.strip().partition(".")
+        if not separator or not dot:
+            raise ConfigError(f"--set expects section.key=value, got {item!r}")
+        section = getattr(config, section_name, None)
+        if section is None or not dataclasses.is_dataclass(section):
+            raise ConfigError(f"unknown config section {section_name!r} in --set {item!r}")
+        try:
+            target = _field_type(section, key)
+        except KeyError:
+            known = ", ".join(f.name for f in dataclasses.fields(section))
+            raise ConfigError(f"unknown setting {path}; [{section_name}] has: {known}") from None
+        setattr(section, key, _parse_scalar(text.strip(), target, path))
+
+
+def load_config(path: Path | None = None, overrides: list[str] | None = None) -> Config:
+    config = Config()
+    if path is not None:
+        with open(path, "rb") as fh:
+            apply_dict(config, tomllib.load(fh))
+    apply_overrides(config, overrides or [])
+    config.validate()
+    return config
+
+
+def config_from_dict(data: dict[str, Any]) -> Config:
+    """Rebuild a config saved in a checkpoint."""
+    config = Config()
+    apply_dict(config, data)
+    config.validate()
+    return config

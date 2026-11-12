@@ -1,0 +1,23 @@
+# Word lists the engine can use.
+#
+# The files themselves are copyrighted and are NOT in the repo: put them in data/lexicon/
+# (gitignored). Format: one entry per line, the word is the first token on the line.
+# `expected_words` is optional; if set, loading fails when the count differs, which catches
+# truncated or mangled files (the old project trained on a list cut off at 10 letters).
+
+default = "NSWL2023"
+
+[lexicons.NSWL2023]
+path = "data/lexicon/NSWL2023.txt"
+expected_words = 195747
+description = "NASPA School Word List 2023. Note: this is the school (expurgated) list, not the tournament NWL2023."
+
+# To add the tournament list or Collins, drop the file in data/lexicon/ and add e.g.:
+#
+# [lexicons.NWL2023]
+# path = "data/lexicon/NWL2023.txt"
+# description = "NASPA Word List 2023 (North American tournament play)."
+#
+# [lexicons.CSW21]
+# path = "data/lexicon/CSW21.txt"
+# description = "Collins Scrabble Words 2021 (international tournament play)."

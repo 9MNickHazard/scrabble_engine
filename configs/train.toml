@@ -1,0 +1,85 @@
+# Training settings, with their defaults.
+#
+# This file lists every setting that affects training. The values here ARE the defaults
+# (src/scrabble_ai/config.py), so the file can be used as is, edited, or copied:
+#
+#     uv run scrabble-ai train --config configs/train.toml --name my-run --hours 8
+#
+# One-off changes do not need a new file:
+#
+#     uv run scrabble-ai train --set model.blocks=10 --set model.channels=128 --set train.learning_rate=5e-4
+#
+# A misspelled section or key is an error, not silently ignored. When a run is resumed it keeps
+# the settings saved in its checkpoint; --config and --set then change only what they name.
+#
+# Speeds quoted below were measured on the RTX 5070 Ti / Ryzen 7 7800X3D (docs/BENCHMARKS.md).
+
+[run]
+name = "run"            # outputs go to <out_dir>/<name>/
+out_dir = "runs"        # relative to the repo root unless absolute
+lexicon = ""            # a name from configs/lexicons.toml; empty = that file's default
+leaves = ""             # leave-value file; empty = data/leaves/<lexicon id>.leaves ("zero" = none)
+seed = 1                # fixes self-play game seeds and all sampling
+hours = 0.0             # stop after this much wall-clock time; 0 = no time limit
+max_games = 0           # stop after this many self-play games; 0 = no limit
+device = "cuda"
+vram_fraction = 0.9     # cap on PyTorch's share of GPU memory. Windows does not raise out-of-memory
+                        # when VRAM fills: it spills into system RAM and slows to a crawl. With the
+                        # cap, an oversized setting fails immediately instead.
+
+[model]
+blocks = 6              # residual blocks. 6x64 scores about 109,000 positions/s; 10x128 about 33,000
+channels = 64           # channels per block (multiple of 8)
+norm = "none"           # "none": no normalization, each block starts as the identity (fastest).
+                        # "group": GroupNorm; about half the speed and 2.7x the training memory.
+vector_hidden = 128     # width of the MLP over the non-board inputs (leave, unseen tiles, scalars)
+head_hidden = 256       # width of the last hidden layer
+value_channels = 8      # per-square channels kept for the head, so it can see where things are
+cross_checks = true     # give the network the cross-check planes: for every empty square, which
+                        # letters fit given the tiles next to it. This is the only way the network
+                        # sees the dictionary. Turn off only to measure what it is worth.
+leave_baseline = true   # the network outputs a correction to the static leave value, so an
+                        # untrained network already plays like the greedy+leave bot
+
+[selfplay]
+games = 256             # games played in lockstep (speed is flat from 256 to 512)
+max_candidates = 64     # moves per decision the network evaluates, the best by score + leave value.
+                        # 32 is about 30% faster per game; fewer candidates means the network can
+                        # never pick a move the static evaluator ranks low.
+max_exchanges = 4       # of those, at most this many exchanges
+temperature_start = 4.0 # exploration: moves are sampled from softmax(value / temperature), in points.
+temperature_end = 0.5   # At 4.0 a move 4 points worse is chosen about 1/e as often as the best.
+temperature_decay_games = 300000  # self-play games over which the temperature falls from start to end
+win_weight = 0.0        # 0 = choose moves by expected spread; 1 = by win probability; between = blend
+win_scale = 100.0       # points that certain victory is worth in that blend
+
+[warmstart]
+games = 100000          # games played by the static evaluator before the network plays (0 = skip)
+temperature = 6.0       # exploration in those games, so the network also sees poor moves
+max_candidates = 16
+steps = 3000            # training steps on that data before self-play starts
+
+[train]
+batch_size = 2048
+learning_rate = 1e-3
+warmup_steps = 500      # linear learning-rate warm-up
+weight_decay = 1e-4
+grad_clip = 1.0         # maximum gradient norm; 0 = off
+value_scale = 50.0      # points per unit of the value output
+huber_delta = 2.0       # the value loss is quadratic within this many units (100 points) and linear beyond
+win_loss_weight = 0.5   # weight of the win-probability loss relative to the value loss
+td_lambda = 1.0         # 1 = Monte Carlo targets: the spread actually gained from each position on.
+                        # Below 1, targets lean on the network's own estimate of the next position,
+                        # which lowers their noise and adds bias. Start at 1; try 0.8-0.9 later.
+replay_capacity = 3000000  # positions kept, about 310 bytes each (3M = 0.9 GB of RAM)
+min_replay = 100000     # positions needed before training starts
+replay_ratio = 4.0      # training samples drawn per new self-play position. Higher = more learning
+                        # from each game, slower self-play, more risk of overfitting old data.
+actor_sync_steps = 250  # training steps between copies of the weights into the self-play network
+augment_transpose = true   # randomly swap rows and columns: the one exact symmetry of the board
+amp = true              # bf16 mixed precision
+checkpoint_minutes = 10.0
+eval_minutes = 20.0     # how often to evaluate against the baselines and gate against the best
+eval_pairs = 250        # seat-swapped pairs per baseline in those evaluations
+gate_pairs = 500        # pairs when testing a checkpoint against the current best network
+keep_checkpoints = 5    # step_*.pt files kept (best.pt is always kept)
