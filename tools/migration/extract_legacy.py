@@ -1,0 +1,130 @@
+"""Copy the newest snapshot of each still-relevant legacy file into the new repo.
+
+Every file in the old OneDrive folder carries a File History suffix such as
+"dqn_model (2025_09_13 23_08_50 UTC).py"; the newest suffix is the current version.
+This picks that version, writes it under a clean name, strips notebook outputs, and
+records where each file came from in legacy/PROVENANCE.md.
+
+Usage:  py -3.12 tools/migration/extract_legacy.py --old <old project folder>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from migrate import long_path, split_snapshot  # noqa: E402
+
+OLD = ""  # the old project folder, set from --old
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+GITHUB_DIR = r"MainDeepQ\scrabble_engine_github"
+
+# (source directory relative to OLD, base name, destination relative to the repo)
+FILES = [
+    (GITHUB_DIR, "dqn_main.py", r"legacy\dqn_main.py"),
+    (GITHUB_DIR, "self_play.py", r"legacy\self_play.py"),
+    (GITHUB_DIR, "dqn_model.py", r"legacy\dqn_model.py"),
+    (GITHUB_DIR, "dqn_state.py", r"legacy\dqn_state.py"),
+    (GITHUB_DIR, "dqn_reward_functions.py", r"legacy\dqn_reward_functions.py"),
+    (GITHUB_DIR, "game_API.py", r"legacy\game_API.py"),
+    (GITHUB_DIR, "valid_moves_script.py", r"legacy\valid_moves_script.py"),
+    (GITHUB_DIR, "dqn_evaluator.py", r"legacy\dqn_evaluator.py"),
+    (GITHUB_DIR, "ai_vs_ai_gui.py", r"legacy\ai_vs_ai_gui.py"),
+    (GITHUB_DIR, "human_vs_ai_gui.py", r"legacy\human_vs_ai_gui.py"),
+    (GITHUB_DIR + r"\scrabble_valid_moves", "Cargo.toml", r"legacy\scrabble_valid_moves\Cargo.toml"),
+    (GITHUB_DIR + r"\scrabble_valid_moves", "Cargo.lock", r"legacy\scrabble_valid_moves\Cargo.lock"),
+    (GITHUB_DIR + r"\scrabble_valid_moves\src", "lib.rs", r"legacy\scrabble_valid_moves\src\lib.rs"),
+    (GITHUB_DIR + r"\scrabble_valid_moves\src", "main.rs", r"legacy\scrabble_valid_moves\src\main.rs"),
+    (GITHUB_DIR, "Letters to Keep EDA.ipynb", r"notebooks\legacy\letters_to_keep_eda.ipynb"),
+    ("", "NSWL2023.txt", r"data\lexicon\NSWL2023.txt"),
+]
+
+
+def snapshots(src_dir: str, base: str) -> list[tuple[str, str]]:
+    """All (timestamp, file name) snapshots of one base name, oldest first."""
+    found = []
+    with os.scandir(long_path(os.path.join(OLD, src_dir))) as it:
+        for entry in it:
+            if entry.is_file(follow_symlinks=False):
+                name, ts = split_snapshot(entry.name)
+                if name == base:
+                    found.append((ts, entry.name))
+    return sorted(found)
+
+
+def read(path: str) -> bytes:
+    with open(long_path(path), "rb") as fh:
+        return fh.read()
+
+
+def strip_notebook(raw: bytes) -> bytes:
+    """Drop cell outputs, and turn absolute paths into the old working folder into relative ones."""
+    text = re.sub(r"C:/Users/[A-Za-z0-9_.-]+.{1,2}Desktop/Data Science Projects/scrabble_engine/", "", raw.decode("utf-8"))
+    nb = json.loads(text)
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") == "code":
+            cell["outputs"] = []
+            cell["execution_count"] = None
+        cell.get("metadata", {}).pop("execution", None)
+    nb.get("metadata", {}).pop("widgets", None)
+    return (json.dumps(nb, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def main() -> None:
+    global OLD
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--old", required=True, help="the old project folder (read only)")
+    OLD = os.path.abspath(parser.parse_args().old)
+    rows = []
+    for src_dir, base, dest_rel in FILES:
+        snaps = snapshots(src_dir, base)
+        if not snaps:
+            raise SystemExit(f"no snapshot found for {src_dir}\\{base}")
+        ts, name = snaps[-1]
+        raw = read(os.path.join(OLD, src_dir, name))
+        digest = hashlib.sha256(raw).hexdigest()
+
+        # Which earlier snapshot first had these exact bytes = when it was last really edited.
+        last_edit = ts
+        for older_ts, older_name in snaps:
+            if hashlib.sha256(read(os.path.join(OLD, src_dir, older_name))).hexdigest() == digest:
+                last_edit = older_ts
+                break
+
+        out = strip_notebook(raw) if dest_rel.endswith(".ipynb") else raw
+        dest = os.path.join(REPO, dest_rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(out)
+        note = "outputs stripped, absolute paths made relative" if out is not raw else ""
+        rows.append((dest_rel.replace("\\", "/"), os.path.join(src_dir, name).replace("\\", "/"),
+                     last_edit, len(snaps), digest, note))
+        print(f"{dest_rel:55s} <- {name}  (first seen {last_edit}, {len(snaps)} snapshots)")
+
+    lines = [
+        "# Legacy file provenance",
+        "",
+        "Generated by `tools/migration/extract_legacy.py`. Each file is the newest snapshot from the old",
+        "OneDrive folder, copied byte-for-byte unless noted. `First seen` is the oldest snapshot with",
+        "identical bytes, i.e. roughly when the file was last really edited. SHA-256 is of the source file",
+        "and matches `manifest.csv` in the archive.",
+        "",
+        "| File in this repo | Source (relative to old folder) | First seen (UTC) | Snapshots | Source SHA-256 | Note |",
+        "|---|---|---|---|---|---|",
+    ]
+    for dest, src, last_edit, count, digest, note in rows:
+        if dest.startswith("data/"):
+            note = "gitignored: copyrighted word list"
+        lines.append(f"| `{dest}` | `{src}` | {last_edit} | {count} | `{digest}` | {note} |")
+    with open(os.path.join(REPO, "legacy", "PROVENANCE.md"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    main()
