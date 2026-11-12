@@ -96,7 +96,23 @@ pub fn candidate(game: &Game, leaves: &LeaveModel, mv: Move) -> Candidate {
         _ if game.scoreless_turns + 1 >= crate::game::SCORELESS_LIMIT => 2,
         _ => 0,
     };
-    let leave_value = if terminal == 1 { 0.0 } else { leaves.value(&leave, bag_after_draw(game, &mv)) };
+    let leave_value = match terminal {
+        1 => 0.0,
+        2 => {
+            // The game ends here with both players losing their own rack's value. The mover knows
+            // their own rack; the opponent's is estimated from the unseen pool, which is the
+            // opponent's rack exactly once the bag is empty.
+            let pool = game.unseen(me);
+            let (mut tiles, mut points) = (0u32, 0u32);
+            for (count, value) in pool.iter().zip(crate::tiles::TILE_VALUES) {
+                tiles += *count as u32;
+                points += *count as u32 * value as u32;
+            }
+            let theirs = if tiles == 0 { 0.0 } else { game.racks[opponent].len() as f32 * points as f32 / tiles as f32 };
+            theirs - leave.value() as f32
+        }
+        _ => leaves.value(&leave, bag_after_draw(game, &mv)),
+    };
     Candidate { mv, score, leave, leave_value, terminal }
 }
 
@@ -247,5 +263,11 @@ mod tests {
         candidates(&passed, &gaddag, &leaves, &mut scratch);
         assert_eq!(scratch.candidates.len(), 1);
         assert_eq!(scratch.candidates[0].terminal, 2);
+        // Its value is the end-of-game adjustment as the mover can estimate it: minus the
+        // mover's own rack (V4 V4 W4 W4 X8 Y4 Z10 = 38) plus the opponent's seven tiles at the
+        // average value of the tiles the mover cannot see. On this empty board that is the other
+        // 93 tiles, worth 187 - 38 = 149 points between them.
+        let expected = 7.0 * 149.0 / 93.0 - 38.0;
+        assert!((scratch.candidates[0].leave_value - expected).abs() < 1e-4);
     }
 }

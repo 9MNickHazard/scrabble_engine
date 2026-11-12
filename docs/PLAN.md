@@ -69,8 +69,12 @@ replay buffer; checkpoints that resume; TensorBoard and JSONL logging; periodic 
 against the baselines and gating against the best network; `scrabble-ai train`.
 
 What has been checked: the full loop runs end to end (warm start, pretraining, self-play,
-evaluation, checkpoint, resume) in smoke tests of a few hundred games, and the Python test suite
-covers the pieces (see the test files in `tests/`).
+evaluation, gating, checkpoint, resume) in two dry runs of a few minutes each, and 231 Python
+tests cover the pieces. The tests were written by a separate author from the code; they found
+six bugs in the plumbing (replay reload after wrap-around, an interrupted warm start being
+skipped on resume, the resume path, three unvalidated settings, cross-device resume), all fixed,
+and none in the training targets, the input features or the sign convention, which they check
+against hand-worked examples.
 
 **What has not been checked, because it needs a real run:**
 

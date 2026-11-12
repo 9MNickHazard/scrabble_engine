@@ -124,9 +124,10 @@ def _train(args: argparse.Namespace) -> int:
         resume = None
         if args.resume:
             # Resuming starts from the checkpoint's own settings; --config and --set adjust them.
-            name = args.name or "run"
-            out_dir = Path(next((o.split("=", 1)[1] for o in overrides if o.startswith("run.out_dir=")), "runs"))
-            run_dir = out_dir / name if out_dir.is_absolute() else REPO_ROOT / out_dir / name
+            # Which run to look in comes from the same places a fresh run takes its name from.
+            where = load_config(Path(args.config) if args.config else None, overrides).run
+            out_dir = Path(where.out_dir)
+            run_dir = out_dir / where.name if out_dir.is_absolute() else REPO_ROOT / out_dir / where.name
             resume = resolve_resume(args.resume, run_dir)
             config = load_checkpoint_config(resume)
             if args.config:

@@ -118,6 +118,22 @@ class Config:
             (self.train.replay_capacity >= self.train.min_replay >= self.train.batch_size, "need replay_capacity >= min_replay >= batch_size"),
             (self.train.value_scale > 0 and self.train.huber_delta > 0, "train.value_scale and huber_delta must be positive"),
             (0.0 < self.run.vram_fraction <= 1.0, "run.vram_fraction must be in (0, 1]"),
+            (self.run.hours >= 0 and self.run.max_games >= 0, "run.hours and run.max_games cannot be negative"),
+            (self.selfplay.temperature_decay_games >= 1, "selfplay.temperature_decay_games must be at least 1"),
+            (self.selfplay.win_scale > 0, "selfplay.win_scale must be positive"),
+            (self.warmstart.games >= 0 and self.warmstart.steps >= 0, "warmstart.games and steps cannot be negative"),
+            (self.warmstart.max_candidates >= 2, "warmstart.max_candidates must be at least 2"),
+            (self.warmstart.temperature >= 0, "warmstart.temperature cannot be negative"),
+            (self.train.actor_sync_steps >= 1, "train.actor_sync_steps must be at least 1"),
+            (self.train.replay_ratio > 0, "train.replay_ratio must be positive"),
+            (self.train.warmup_steps >= 0 and self.train.weight_decay >= 0 and self.train.grad_clip >= 0,
+             "train.warmup_steps, weight_decay and grad_clip cannot be negative"),
+            (self.train.win_loss_weight >= 0, "train.win_loss_weight cannot be negative"),
+            (self.train.eval_pairs >= 2 and self.train.gate_pairs >= 2,
+             "train.eval_pairs and gate_pairs must be at least 2 (an interval needs two pairs)"),
+            (self.train.checkpoint_minutes > 0 and self.train.eval_minutes > 0,
+             "train.checkpoint_minutes and eval_minutes must be positive"),
+            (self.train.keep_checkpoints >= 1, "train.keep_checkpoints must be at least 1"),
         ]
         for ok, message in checks:
             if not ok:

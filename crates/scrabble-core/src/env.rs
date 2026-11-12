@@ -392,7 +392,10 @@ mod tests {
             let actions: Vec<i32> = arrays.count.iter().map(|&c| (c - 1).max(0)).collect();
             env.apply(&actions).unwrap();
         }
-        assert!(env.apply(&vec![99; n]).is_err() || arrays.status.iter().all(|&s| s != STATUS_DECISION));
+        // An action that is not one of the candidates is an error wherever a decision is pending.
+        env.prepare(&gaddag, &leaves, arrays.buffers());
+        let pending = arrays.status.iter().any(|&s| s == STATUS_DECISION);
+        assert_eq!(env.apply(&vec![99; n]).is_err(), pending);
     }
 
     #[test]

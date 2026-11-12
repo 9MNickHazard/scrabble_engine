@@ -20,6 +20,7 @@ conservative. Correctness results do not depend on that.
 | Hidden information | `cargo test -p scrabble-core --test properties hidden -- --nocapture` | 1,337 positions with the opponent's rack swapped for other unseen tiles: every network input identical; 16,878 endgame afterstates show the opponent's rack as the unseen pool, as they should |
 | Greedy games, every move re-validated | `cargo test -p scrabble-core --test real_lexicon -- --nocapture` | 300 games, every generated play accepted by the independent validator with the same score, no duplicates |
 | The reference's own tests | `cargo test -p scrabble-reference` | 26 tests pass, including agreement with an exhaustive enumerator on small racks |
+| Python suite (targets, features, replay, self-play, trainer, CLI) | `uv run pytest` | 231 tests pass in about 16 s. The training targets and the input layout are checked against hand arithmetic. |
 
 The reference (`crates/scrabble-reference`) was written by a different author from
 `docs/RULES.md` alone, and finds moves by sliding every word in the lexicon along every row and

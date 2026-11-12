@@ -128,6 +128,8 @@ class Trainer:
         self.positions = 0  # self-play positions added to the replay
         self.elapsed = 0.0  # seconds of training wall-clock across all sessions
         self.phase = "warmstart" if config.warmstart.games > 0 else "selfplay"
+        self.warm_games = 0  # warm-start games finished
+        self.warm_next_seed = run.seed * 1_000_000_000  # seed of the next warm-start game
         self.samples_owed = 0.0
         self.window = ActorStats()
         self.losses: list[tuple[float, float, float, float]] = []
@@ -224,38 +226,51 @@ class Trainer:
 
     # ---- phases --------------------------------------------------------------------------
 
-    def warm_start(self, should_stop) -> None:
-        """Fill the replay with games played by the static evaluator, then pretrain on them."""
+    def warm_start(self, should_stop) -> bool:
+        """Fill the replay with games played by the static evaluator, then pretrain on them.
+
+        Returns True when both parts are complete. If the run is stopped part-way, the progress
+        counters (`warm_games`, `warm_next_seed`, `step`) say where a resumed run picks up, so
+        nothing is skipped and no game seed is played twice.
+        """
         warm = self.config.warmstart
-        slots = max(self.config.selfplay.games, 512)
-        actor = Actor(self.engine, self.leaves, self.replay, slots, warm.max_candidates,
-                      min(self.config.selfplay.max_exchanges, warm.max_candidates - 2), 1.0, self.device,
-                      first_seed=self.seed_base, sampling_seed=self.config.run.seed + 2)
-        self._say(f"warm start: {warm.games:,} games by the static evaluator (temperature {warm.temperature})")
-        stats, start, last = ActorStats(), time.time(), time.time()
-        while stats.games < warm.games and not should_stop():
-            stats.merge(actor.step(None, warm.temperature))
-            if time.time() - last > 30:
-                last = time.time()
-                self._say(f"  {stats.games:,} games, {stats.games / (time.time() - start):.0f} games/s")
-        seconds = time.time() - start
-        self._say(f"warm start: {stats.games:,} games, {stats.positions:,} positions in {seconds:.0f} s "
-                  f"({stats.games / max(seconds, 1e-9):.0f} games/s); replay holds {len(self.replay):,}")
-        self._log("warmstart", {"games_played": stats.games, "positions_added": stats.positions, "seconds": seconds,
-                                "mean_score": stats.score_sum / max(1, 2 * stats.games)})
-        if len(self.replay) < self.config.train.batch_size:
-            return
-        self._say(f"pretraining: {warm.steps:,} steps")
-        start = time.time()
-        for _ in range(warm.steps):
-            if should_stop():
-                break
-            self.train_step()
-            if self.step % 500 == 0:
-                self._report_training()
-        self._report_training()
+        if self.warm_games < warm.games:
+            slots = max(self.config.selfplay.games, 512)
+            actor = Actor(self.engine, self.leaves, self.replay, slots, warm.max_candidates,
+                          min(self.config.selfplay.max_exchanges, warm.max_candidates - 2), 1.0, self.device,
+                          first_seed=self.warm_next_seed, sampling_seed=self.config.run.seed + 2 + self.warm_games)
+            self._say(f"warm start: {warm.games - self.warm_games:,} games by the static evaluator "
+                      f"(temperature {warm.temperature})")
+            stats, start, last = ActorStats(), time.time(), time.time()
+            while self.warm_games < warm.games and not should_stop():
+                step = actor.step(None, warm.temperature)
+                stats.merge(step)
+                self.warm_games += step.games
+                # Games still in progress are abandoned on a stop; their seeds are not reused.
+                self.warm_next_seed = actor.next_seed
+                if time.time() - last > 30:
+                    last = time.time()
+                    self._say(f"  {stats.games:,} games, {stats.games / (time.time() - start):.0f} games/s")
+            seconds = time.time() - start
+            self._say(f"warm start: {stats.games:,} games, {stats.positions:,} positions in {seconds:.0f} s "
+                      f"({stats.games / max(seconds, 1e-9):.0f} games/s); replay holds {len(self.replay):,}")
+            self._log("warmstart", {"games_played": stats.games, "positions_added": stats.positions, "seconds": seconds,
+                                    "mean_score": stats.score_sum / max(1, 2 * stats.games)})
+            if self.warm_games < warm.games:
+                return False
+        if len(self.replay) >= self.config.train.batch_size and self.step < warm.steps:
+            self._say(f"pretraining: {warm.steps - self.step:,} steps")
+            start = time.time()
+            while self.step < warm.steps and not should_stop():
+                self.train_step()
+                if self.step % 500 == 0:
+                    self._report_training()
+            self._report_training()
+            self._say(f"pretraining: reached step {self.step:,} in {time.time() - start:.0f} s")
+            if self.step < warm.steps:
+                return False
         self.actor_net.load_state_dict(self.net.state_dict())
-        self._say(f"pretraining done in {time.time() - start:.0f} s")
+        return True
 
     def _report_training(self) -> None:
         if not self.losses:
@@ -351,6 +366,8 @@ class Trainer:
             "positions": self.positions,
             "elapsed": self.elapsed,
             "phase": self.phase,
+            "warm_games": self.warm_games,
+            "warm_next_seed": self.warm_next_seed,
             "samples_owed": self.samples_owed,
             "replay": self.replay.state(),
             "actor": self.actor.state(),
@@ -387,8 +404,13 @@ class Trainer:
         self.optimizer.load_state_dict(state["optimizer"])
         self.step, self.games, self.positions = state["step"], state["games"], state["positions"]
         self.elapsed, self.phase, self.samples_owed = state["elapsed"], state["phase"], state["samples_owed"]
+        self.warm_games, self.warm_next_seed = state["warm_games"], state["warm_next_seed"]
         self.rng.bit_generator.state = state["numpy_rng"]
-        self.generator.set_state(state["torch_generator"].cpu())
+        try:
+            self.generator.set_state(state["torch_generator"].cpu())
+        except RuntimeError:
+            # Saved on another device (GPU vs CPU): start a new stream, fixed by seed and step.
+            self.generator.manual_seed(self.config.run.seed + self.step)
         replay_dir = self.run_dir / "replay"
         if replay_dir.exists():
             self.replay.load(replay_dir, state["replay"])
@@ -417,11 +439,11 @@ class Trainer:
         last_tick = last_report = time.time()
         try:
             if self.phase == "warmstart":
-                self.warm_start(should_stop)
-                self.phase = "selfplay"
+                finished = self.warm_start(should_stop)
                 self.elapsed += time.time() - last_tick
                 last_tick = time.time()
-                if not should_stop():
+                if finished:
+                    self.phase = "selfplay"
                     self.save()
             last_report = last_checkpoint = last_eval = time.time()
             scorer = self._scorer(self.actor_net)

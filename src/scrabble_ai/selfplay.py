@@ -317,6 +317,11 @@ class Actor:
         """Resume the seed counter and sampling stream. Games that were in progress when the
         checkpoint was written are not restored: every slot starts a fresh game."""
         self.next_seed = int(state["next_seed"])
-        self.generator.set_state(state["generator"].cpu())
+        try:
+            self.generator.set_state(state["generator"].cpu())
+        except RuntimeError:
+            # The state came from a generator on another device (GPU vs CPU): start a new
+            # stream, still fixed by the seed counter so a resume is repeatable.
+            self.generator.manual_seed(self.next_seed)
         for slot in range(self.slots):
             self._start(slot)

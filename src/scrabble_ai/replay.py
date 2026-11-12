@@ -45,7 +45,7 @@ class Replay:
 
     def add(self, rows: dict[str, np.ndarray]) -> None:
         """Append a block of positions (same keys as FIELDS), overwriting the oldest when full."""
-        count = len(rows["board"])
+        count = added = len(rows["board"])
         if count == 0:
             return
         if count > self.capacity:
@@ -58,7 +58,7 @@ class Replay:
                 array[: count - first] = rows[name][first:]
         self.next = (self.next + count) % self.capacity
         self.size = min(self.capacity, self.size + count)
-        self.total_added += count
+        self.total_added += added
 
     def sample(self, batch_size: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
         """A uniformly random batch (with replacement), sorted by index for memory locality."""
@@ -69,13 +69,18 @@ class Replay:
         return {"size": self.size, "next": self.next, "total_added": self.total_added, "capacity": self.capacity}
 
     def save(self, directory: Path) -> None:
-        """Write the filled part of each array as `<name>.npy`, each via a temporary file so an
-        interrupted save never leaves a truncated file under the final name."""
+        """Write the positions held, oldest first, as `<name>.npy`. Each file goes through a
+        temporary name so an interrupted save never leaves a truncated file under the final one."""
         directory.mkdir(parents=True, exist_ok=True)
+        if self.size == self.capacity and self.next != 0:
+            # The ring has wrapped: the oldest position sits at `next`.
+            order = np.concatenate([np.arange(self.next, self.capacity), np.arange(self.next)])
+        else:
+            order = slice(0, self.size)
         for name, array in self.arrays.items():
             temporary = directory / f"{name}.npy.tmp"
             with open(temporary, "wb") as fh:
-                np.save(fh, array[: self.size])
+                np.save(fh, array[order])
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(temporary, directory / f"{name}.npy")
@@ -83,9 +88,10 @@ class Replay:
     def load(self, directory: Path, state: dict[str, int]) -> None:
         """Restore what `save` wrote. `state` is the matching `state()` from the checkpoint.
 
-        Positions carry their own targets, so any consistent set of files is usable: if the
-        files do not match `state` exactly (a different capacity, or a checkpoint older than the
-        files), the most recent positions that fit are kept and writing resumes after them.
+        The files hold positions oldest first and each position carries its own targets, so the
+        files alone decide what is restored: the newest positions that fit this buffer, with
+        writing set to overwrite the oldest of them next. A different capacity, or files newer
+        than the checkpoint, therefore need no special handling.
         """
         saved = {name: np.load(directory / f"{name}.npy", mmap_mode="r") for name in FIELDS}
         lengths = {len(array) for array in saved.values()}
@@ -95,7 +101,6 @@ class Replay:
         keep = min(count, self.capacity)
         for name, array in self.arrays.items():
             array[:keep] = saved[name][count - keep:]
-        exact = state["size"] == count and state["capacity"] == self.capacity
         self.size = keep
-        self.next = state["next"] if exact else keep % self.capacity
+        self.next = keep % self.capacity
         self.total_added = state["total_added"]
