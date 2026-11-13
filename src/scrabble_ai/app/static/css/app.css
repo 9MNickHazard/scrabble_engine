@@ -868,8 +868,8 @@ div.ov-progress-text.muted { margin: 16px 0 18px; color: var(--text-muted); }
 .gd-section th { padding-top: var(--space-4); background: var(--surface-2); text-align: left; font-weight: 400; }
 .gd-section-title { font-size: var(--text-m); font-weight: 650; color: var(--text-primary); }
 .gd-section-desc { display: block; margin-top: 2px; font-size: var(--text-s); color: var(--text-secondary); }
-.gd-setting { font-weight: 400; text-align: left; }
-.gd-label { display: flex; align-items: center; gap: 6px; font-weight: 650; color: var(--text-primary); }
+.gd-table .gd-setting { font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.gd-label { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-weight: 650; color: var(--text-primary); }
 .gd-setting .tm-key { display: block; margin-top: 2px; overflow-wrap: anywhere; }
 .gd-help { color: var(--text-secondary); }
 .gd-effect { color: var(--text-secondary); }

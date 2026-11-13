@@ -850,7 +850,7 @@
       Charts.statTile({ label: "Latest against greedy + leave", value: final ? spreadValue(final.spread, final.ci) : "–",
         hint: final ? `step ${fmt.int(final.step)} · win rate ${fmt.pct(final.win_rate)}` : "no evaluation yet" }),
       Charts.statTile({ label: "First significant win", value: fs ? fmt.compact(fs.games) + " games" : final ? "not yet" : "–",
-        hint: fs ? `after ${fmt.duration(fs.hours)} of training` : final ? "the interval still includes zero" : "no evaluation yet" }),
+        hint: fs ? `after ${fmt.duration(fs.hours)} of training` : final ? "no evaluation's interval has been above zero" : "no evaluation yet" }),
       Charts.statTile({ label: "Value error below leave-only", value: sum.value_rmse_gain === null || sum.value_rmse_gain === undefined ? "–"
         : fmt.signed(sum.value_rmse_gain, 2), hint: "points of RMSE, last 10 measurements" }),
     ];
