@@ -12,7 +12,7 @@ comes next. [DESIGN.md](DESIGN.md) explains how the system works and
 | 1 | Rust engine: lexicon, move generator, rules, tests, Python bindings | Done |
 | 2 | Baseline bots, leave values, paired evaluation | Done |
 | 3 | RL pipeline: features, network, self-play, training loop, checkpoints | Code done and smoke-tested. **No real training run yet.** |
-| 4 | `analyze` and `play` commands, local web UI, GCG import/export | Not started |
+| 4 | Desktop app (train, compare, play, watch, matches); `analyze` command, GCG import/export | App built and tested. `analyze` and GCG not started |
 | 5 | Simulation, endgame solver, longer runs | Not started |
 
 The next step is the first real training run, which is the owner's to start
@@ -96,15 +96,33 @@ A five-minute dry run of that command ran at 58 self-play games a second with tr
 loop, which extrapolates to about 1.7 million games in 8 hours. The estimate gets replaced by the
 run's own log.
 
-## Phase 4: analysis and play (not started)
+## Phase 4: the app, analysis and play (app done)
+
+**Built: Scrabble Lab**, a local desktop app ([APP.md](APP.md)): start training runs one after
+another or side by side with any settings, follow them live, read an automatic report of each
+run, compare runs, browse saved networks, play against them with hints and the network's own
+reasoning shown, watch any two players on a board, and run fast matches with statistics and
+replayable games. It replaces the old tkinter GUIs in `legacy/`.
+
+How it was checked:
+
+| Check | Result |
+|---|---|
+| Server and analysis tests (`tests/test_app_*.py`, `tests/test_insights.py`) | 372 tests, written by a separate author from the code. They pinned 22 bugs in the server, all fixed; the worst was that the on-screen greedy and random bots differed slightly from the ones in matches. |
+| A match game replays in the viewer move for move | Tested for all three bots and a network, both seatings |
+| Start two runs from the form, one after another; the second starts by itself; stop, resume, delete | Driven through the real pages in a headless browser against the real server, with two one-minute CPU smoke runs |
+| A whole game played through the Play page, and one watched to the end and replayed from its seed | Same way, against a smoke-test network |
+| Every page loads without a script error, with the real server and on invented data, dark and light | Yes |
+
+The charts and report pages were checked visually against invented long runs, since no real long
+run exists yet. The first real run is their first real test.
+
+Still to do in this phase:
 
 - `scrabble-ai analyze`: given a board, rack and scores, print ranked moves with their score, leave
-  value, network value and win probability. This is the project's original goal, and needs a
-  trained network to be worth much.
-- `scrabble-ai play`: play against any bot or network in the terminal.
+  value, network value and win probability (the app shows this during a game; this would do it
+  for an arbitrary position).
 - GCG import and export, so games can be viewed in standard tools.
-- A small web UI served on localhost. `legacy/` (which still holds the old tkinter GUIs) is deleted
-  once this replaces them.
 
 ## Phase 5: stretch
 

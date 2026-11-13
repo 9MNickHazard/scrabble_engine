@@ -105,6 +105,38 @@ With GroupNorm instead (`--norm group`), measured earlier the same day with the 
 the 6 x 64 network scored 54,371 positions/s in self-play and trained at 21,621 positions/s using
 3.84 GB. That is why the default is no normalization.
 
+### Larger networks
+
+`uv run scrabble-ai bench --models 12x192,16x192` and
+`uv run scrabble-ai bench --models 20x256 --batch 1024`
+
+| Network | Parameters | Self-play: positions scored/s | Self-play: decisions/s | Training: positions/s | Peak VRAM (training) |
+|---|---|---|---|---|---|
+| 12 x 192 | 8.76 M | 15,046 | 239 | 5,461 | 7.06 GB |
+| 16 x 192 | 11.42 M | 11,208 | 178 | 3,942 | 9.07 GB |
+| 20 x 256 (batch 1,024) | 24.49 M | 6,099 | 97 | 2,210 | 7.58 GB |
+
+None of these has been run through the whole training loop. The games-per-second figures the app
+shows for them (8.5, 6 and 3.4) are worked out from this table by the same ratio the 6 x 64 network
+showed between its self-play speed alone and its speed with training running, so they are
+estimates until a run's own log replaces them.
+
+### Several runs at the same time
+
+Three copies of `uv run scrabble-ai bench --models 6x64` started together, to find out whether
+training several networks at once saves time:
+
+| | One process alone | Each of three at once | Three together | Change in total |
+|---|---|---|---|---|
+| Self-play, decisions/s | 1,645 | 569, 567, 568 | 1,704 | +3.6% |
+| Training, positions/s | 46,030 | 16,581, 16,780, 16,416 | 49,777 | +8.1% |
+| Bots alone on the CPU, greedy games/s | 2,356 | 868, 899, 893 | 2,660 | +12.9% |
+
+The GPU is the limit, and it is already busy with one run, so three runs side by side each go at
+about a third of the speed. Running networks together finishes them all at the same moment and
+saves between 4% and 8% of the total time; running them one after another gives the first
+result three times sooner. The app offers both ("At the same time" and "One after another").
+
 ## The whole training loop
 
 A five-minute dry run of the real command with a shortened warm start (not a training result:

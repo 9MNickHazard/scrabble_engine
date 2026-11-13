@@ -4,10 +4,10 @@ A Scrabble AI trained on one desktop PC: a fast Rust engine with a verified move
 PyTorch value network that learns by self-play to judge the position each candidate move leaves
 behind.
 
-**Status (November 2026).** The engine, the baseline bots and the training pipeline are written
-and tested. No network has been trained yet beyond seconds-long smoke tests, so there is no
-strength result for the network to report. What is measured so far is in
-[Results](#results-so-far).
+**Status (November 2026).** The engine, the baseline bots, the training pipeline and a desktop
+app to run it all are written and tested. No network has been trained yet beyond smoke tests of
+a minute or two, so there is no strength result for the network to report. What is measured so
+far is in [Results](#results-so-far).
 
 This is a rewrite. The first version of this project (Keras, 2025) is in [`legacy/`](legacy/) for
 reference; it did not learn, for reasons set out in [docs/legacy-audit.md](docs/legacy-audit.md).
@@ -28,6 +28,9 @@ one batched pass on the GPU.
   letters fit on each empty square), which is how it sees the dictionary.
 - **Training**: self-play in one process, a replay buffer in RAM, paired evaluation against the
   baselines, and resumable checkpoints.
+- **Scrabble Lab** (`src/scrabble_ai/app`): a local desktop app to start and follow training
+  runs, compare them, browse the saved networks, play against them, watch them play, and run
+  fast matches with statistics. See [docs/APP.md](docs/APP.md).
 
 [docs/DESIGN.md](docs/DESIGN.md) has the details and the reasoning.
 
@@ -88,6 +91,8 @@ uv run scrabble-ai fit-leaves  # fits leave values for it (about 15 minutes); ne
 ## Use
 
 ```powershell
+uv run scrabble-ai app                      # Scrabble Lab: everything below, in a window
+uv run scrabble-ai app --install-shortcut   # put its shortcut on the Desktop
 uv run scrabble-ai train --config configs/train.toml --name night1 --hours 8
 uv run scrabble-ai train --name night1 --resume latest --hours 8
 uv run scrabble-ai eval runs/night1/checkpoints/best.pt greedy-leave --pairs 2000
@@ -95,8 +100,12 @@ uv run scrabble-ai eval greedy-leave greedy --pairs 2000
 uv run scrabble-ai bench
 ```
 
-[docs/TRAINING.md](docs/TRAINING.md) covers starting, watching, stopping and resuming a run, and
-every setting is explained in [configs/train.toml](configs/train.toml).
+[docs/TRAINING.md](docs/TRAINING.md) covers starting, watching, stopping and resuming a run from
+the command line, [docs/APP.md](docs/APP.md) does the same for the app, and every setting is
+explained in [configs/train.toml](configs/train.toml).
+
+The app is a web page served on 127.0.0.1 by the Python standard library and shown in its own
+window; it needs nothing beyond what `uv sync` installs, and nothing leaves the machine.
 
 ## Tests
 
@@ -117,9 +126,10 @@ crates/scrabble-core/        Rust engine
 crates/scrabble-reference/   independent brute-force rules and move finder, used only as a test oracle
 crates/scrabble-py/          PyO3 bindings (the scrabble_ai._core module)
 src/scrabble_ai/             features, network, self-play, training, evaluation, CLI
+src/scrabble_ai/app/         Scrabble Lab: local server, run manager, analysis, and the pages (static/)
 configs/                     train.toml (every training setting), lexicons.toml
 tests/                       Python tests
-docs/                        DESIGN, TRAINING, RULES, BENCHMARKS, PLAN, legacy-audit
+docs/                        DESIGN, TRAINING, APP, APP_API, RULES, BENCHMARKS, PLAN, legacy-audit
 legacy/                      the 2025 version, for reference only
 tools/                       migration scripts and the scripts behind the legacy audit
 data/, runs/                 word lists, leave values, checkpoints, logs (not in the repo)
@@ -129,6 +139,8 @@ data/, runs/                 word lists, leave values, checkpoints, logs (not in
 
 - [docs/DESIGN.md](docs/DESIGN.md): what is trained, what the network is given, and why
 - [docs/TRAINING.md](docs/TRAINING.md): running a training run and changing its settings
+- [docs/APP.md](docs/APP.md): the desktop app, page by page
+- [docs/APP_API.md](docs/APP_API.md): the contract between the app's pages and its server
 - [docs/RULES.md](docs/RULES.md): the rules the engine implements
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): every measured number and the command behind it
 - [docs/PLAN.md](docs/PLAN.md): what is done and what comes next

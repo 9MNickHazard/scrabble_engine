@@ -36,6 +36,12 @@ the old code. Machine-specific notes, if any, are in `CLAUDE.local.md` (not comm
 - Config is TOML read with the standard library into dataclasses (`src/scrabble_ai/config.py`);
   `configs/train.toml` must list every setting with its default (a test checks this).
 - `legacy/` is reference only. Do not import from it, fix it or extend it.
+- The desktop app is `src/scrabble_ai/app/` (`uv run scrabble-ai app`; docs in `docs/APP.md`,
+  the page/server contract in `docs/APP_API.md`). The server is standard-library Python bound to
+  127.0.0.1; the pages in `static/` are plain JS/CSS/SVG with no build step and no CDN. To work
+  on it without touching real runs: `--no-window --port <n> --runs-dir <folder> --data-dir
+  <folder>`, and `?mock=1` in the address runs the pages on invented data. Check pages in a real
+  browser before calling UI work done. It must stay local: never host it, and no sign-in pages.
 - The essential code (engine, move generation, rules, RL formulation, training loop) is written by
   the lead model; well-specified side tasks go to Opus subagents.
 - The default lexicon is `data/lexicon/NSWL2023.txt`, the NASPA *school* list (195,747 words). A

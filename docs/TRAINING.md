@@ -3,6 +3,9 @@
 How to start, watch, stop and resume a training run, and how to change what it does.
 [DESIGN.md](DESIGN.md) explains what is being trained and why it is built this way.
 
+Everything here can also be done from the desktop app, Scrabble Lab ([APP.md](APP.md)): the same
+runs, the same files, the same settings.
+
 ## Before the first run
 
 These are one-off steps. On Nick's PC they are already done.
