@@ -108,6 +108,11 @@ impl Play {
         out
     }
 
+    /// The main word in plain upper case, for example `QUIZ`.
+    pub fn word_plain(&self) -> String {
+        self.word[..self.len as usize].iter().map(|&code| (b'A' + (code & LETTER_BITS)) as char).collect()
+    }
+
     /// Position in the usual notation: row then column (`8D`) for across, column then row
     /// (`D8`) for down.
     pub fn position_text(&self) -> String {

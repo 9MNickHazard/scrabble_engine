@@ -191,6 +191,12 @@ class ActorStats:
     value_sq_error: float = 0.0  # network value vs the spread actually gained
     leave_sq_error: float = 0.0  # the same for the static leave value alone
     win_sq_error: float = 0.0  # Brier score of the win probability
+    # What the games looked like.
+    bingos: int = 0  # placements of all seven tiles
+    exchanges: int = 0
+    passes: int = 0
+    max_game_score: int = 0  # highest single-player score in a game
+    max_play_score: int = 0  # highest-scoring single placement
     recent: list[tuple[int, int, int]] = field(default_factory=list)  # (seed, score0, score1)
 
     def merge(self, other: "ActorStats") -> None:
@@ -204,6 +210,11 @@ class ActorStats:
         self.value_sq_error += other.value_sq_error
         self.leave_sq_error += other.leave_sq_error
         self.win_sq_error += other.win_sq_error
+        self.bingos += other.bingos
+        self.exchanges += other.exchanges
+        self.passes += other.passes
+        self.max_game_score = max(self.max_game_score, other.max_game_score)
+        self.max_play_score = max(self.max_play_score, other.max_play_score)
 
 
 class Actor:
@@ -269,6 +280,15 @@ class Actor:
             "value_target": target[keep].astype(np.float32),
             "win_target": won[keep],
         })
+        kind = meta[:, _core.M_KIND]
+        placed = ((self.t_board[slot, :n] & _core.CODE_PLACED) != 0).sum(axis=1)
+        stats.bingos += int((placed == 7).sum())
+        stats.exchanges += int((kind == 1).sum())
+        stats.passes += int((kind == 2).sum())
+        stats.max_game_score = max(stats.max_game_score, score0, score1)
+        plays = keep & (kind == 0)  # a going-out play's score includes the end bonus, so leave it out
+        if plays.any():
+            stats.max_play_score = max(stats.max_play_score, int(meta[plays, _core.M_SCORE].max()))
         stats.games += 1
         stats.positions += int(keep.sum())
         stats.turns += int(self.env.turn(slot))

@@ -102,7 +102,13 @@ def test_a_fresh_run_writes_its_outputs(fresh):
     assert {"warmstart", "train", "selfplay", "eval", "checkpoint"} <= kinds
     warm = next(r for r in records if r["kind"] == "warmstart")
     assert warm["games_played"] >= 16 and warm["positions_added"] > 0
-    assert records[-1]["kind"] == "checkpoint" and records[-1]["file"] == fresh.latest.name
+    assert records[0]["kind"] == "session" and records[0]["event"] == "start" and records[0]["parameters"] > 0
+    assert records[-1]["kind"] == "session" and records[-1]["event"] == "stop" and records[-1]["finished"] is True
+    assert sum(r["kind"] == "session" and r["event"] == "selfplay" for r in records) == 1
+    assert records[-2]["kind"] == "checkpoint" and records[-2]["file"] == fresh.latest.name
+    assert not (run_dir / "running.json").exists(), "the marker is removed when the run stops"
+    index = json.loads((checkpoints / "index.json").read_text(encoding="utf-8"))
+    assert index["best"]["file"] == "best.pt" and [c["file"] for c in index["checkpoints"]][-1] == fresh.latest.name
     evals = [r for r in records if r["kind"] == "eval"]
     assert {r["opponent"] for r in evals} == {"greedy-leave", "greedy"} and all(r["pairs"] == 2 for r in evals)
 

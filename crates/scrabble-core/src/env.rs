@@ -17,7 +17,7 @@ use crate::encode::{board_codes, encode_afterstate, META};
 use crate::gaddag::Gaddag;
 use crate::game::Game;
 use crate::leave::LeaveModel;
-use crate::moves::Move;
+use crate::moves::{Move, Play};
 use crate::policy::{candidates, choose, Bot, Candidate, Scratch};
 use crate::rng::Rng;
 use crate::tiles::TILE_TYPES;
@@ -39,6 +39,43 @@ pub const STATUS_DECISION: u8 = 1;
 /// The game has ended; its final scores are in the `scores` output. Reset the slot to reuse it.
 pub const STATUS_FINISHED: u8 = 2;
 
+/// What one seat did over a game.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SeatStats {
+    /// Placements that used all seven tiles.
+    pub bingos: u16,
+    pub exchanges: u16,
+    pub passes: u16,
+    pub placements: u16,
+    /// The highest-scoring placement (its score excludes any end-of-game bonus).
+    pub best_score: i16,
+    pub best_play: Option<Play>,
+}
+
+/// Per-game statistics, kept for every game whoever controls the seats.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct GameStats {
+    pub seats: [SeatStats; 2],
+}
+
+impl GameStats {
+    fn record(&mut self, seat: usize, mv: &Move) {
+        let stats = &mut self.seats[seat];
+        match mv {
+            Move::Play(play) => {
+                stats.placements += 1;
+                stats.bingos += (play.tiles_played == 7) as u16;
+                if stats.best_play.is_none() || play.score > stats.best_score {
+                    stats.best_score = play.score;
+                    stats.best_play = Some(*play);
+                }
+            }
+            Move::Exchange(_) => stats.exchanges += 1,
+            Move::Pass => stats.passes += 1,
+        }
+    }
+}
+
 struct Slot {
     game: Game,
     controllers: [Controller; 2],
@@ -46,6 +83,7 @@ struct Slot {
     status: u8,
     /// Candidates offered for the pending external decision, in the order they were written.
     offered: Vec<Candidate>,
+    stats: GameStats,
 }
 
 /// The caller's buffers for one `prepare` call. With `n` slots and at most `k` candidates each:
@@ -87,6 +125,7 @@ impl BatchEnv {
             rng: Rng::new(0),
             status: STATUS_EMPTY,
             offered: Vec::new(),
+            stats: GameStats::default(),
         };
         BatchEnv { slots: (0..slots).map(|_| empty()).collect(), max_candidates, max_exchanges }
     }
@@ -111,6 +150,7 @@ impl BatchEnv {
         s.rng = Rng::new(seed ^ 0xB07_5EED);
         s.status = STATUS_DECISION; // settled by the next `prepare`
         s.offered.clear();
+        s.stats = GameStats::default();
     }
 
     /// Empty `slot` so it is skipped until it is reset.
@@ -121,6 +161,11 @@ impl BatchEnv {
 
     pub fn game(&self, slot: usize) -> &Game {
         &self.slots[slot].game
+    }
+
+    /// Statistics of the game in `slot` so far.
+    pub fn stats(&self, slot: usize) -> &GameStats {
+        &self.slots[slot].stats
     }
 
     /// The move behind candidate `index` of the pending decision in `slot`.
@@ -162,6 +207,7 @@ impl BatchEnv {
                                 Controller::External => break,
                                 Controller::Bot(bot) => {
                                     let mv = choose(bot, &slot.game, gaddag, leaves, &mut slot.rng, scratch);
+                                    slot.stats.record(slot.game.to_move, &mv);
                                     slot.game.apply(&mv);
                                 }
                             }
@@ -171,7 +217,7 @@ impl BatchEnv {
                             slot.offered.clear();
                         } else {
                             slot.status = STATUS_DECISION;
-                            select(&slot.game, gaddag, leaves, scratch, k, max_exchanges, &mut slot.offered);
+                            select_candidates(&slot.game, gaddag, leaves, scratch, k, max_exchanges, &mut slot.offered);
                             let base = board_codes(&slot.game.board);
                             let pool = slot.game.unseen(slot.game.to_move);
                             for (i, candidate) in slot.offered.iter().enumerate() {
@@ -209,6 +255,7 @@ impl BatchEnv {
                 return Err(format!("slot {index}: action {action} is not one of {} candidates", slot.offered.len()));
             };
             let mv = candidate.mv;
+            slot.stats.record(slot.game.to_move, &mv);
             slot.game.apply(&mv);
             slot.offered.clear();
         }
@@ -218,7 +265,7 @@ impl BatchEnv {
 
 /// Choose which moves to offer: the best placements by static value, up to `max_exchanges`
 /// exchanges, and pass when the rules of [`candidates`] include it. Sorted best first.
-fn select(
+pub fn select_candidates(
     game: &Game,
     gaddag: &Gaddag,
     leaves: &LeaveModel,

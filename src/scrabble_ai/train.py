@@ -164,15 +164,17 @@ class Trainer:
         if not self.quiet:
             print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
 
-    def _log(self, kind: str, values: dict) -> None:
+    def _log(self, kind: str, values: dict, tag: str | None = None) -> None:
+        """Append a record to metrics.jsonl (docs/APP_API.md lists the kinds and fields) and
+        mirror its numbers to TensorBoard under `tag` (default: the kind)."""
         record = {"kind": kind, "time": time.time(), "step": self.step, "games": self.games,
                   "positions": self.positions, "hours": round(self.elapsed / 3600, 4), **values}
         with open(self.run_dir / "metrics.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
         if self.writer is not None:
             for key, value in values.items():
-                if isinstance(value, (int, float)):
-                    self.writer.add_scalar(f"{kind}/{key}", value, self.games if kind != "train" else self.step)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    self.writer.add_scalar(f"{tag or kind}/{key}", value, self.games if kind != "train" else self.step)
 
     # ---- learning ------------------------------------------------------------------------
 
@@ -301,6 +303,11 @@ class Trainer:
             "win_brier": w.win_sq_error / n,
             "replay_positions": len(self.replay),
             "replay_gb": self.replay.memory_bytes / 2**30,
+            "bingos_per_game": w.bingos / w.games,
+            "exchanges_per_game": w.exchanges / w.games,
+            "passes_per_game": w.passes / w.games,
+            "max_game_score": w.max_game_score,
+            "max_play_score": w.max_play_score,
         }
         self._log("selfplay", values)
         self._say(f"games {self.games:,} ({values['games_per_second']:.1f}/s), step {self.step:,}, "
@@ -322,8 +329,10 @@ class Trainer:
                                 sp.max_candidates, sp.max_exchanges)
             results.append(result)
             self._say("eval: " + result.line())
-            self._log("eval", {"opponent": bot, f"spread_vs_{bot}": result.spread, f"spread_ci_vs_{bot}": result.spread_ci,
-                               f"win_rate_vs_{bot}": result.win_rate, "pairs": result.pairs})
+            self._log("eval", {"opponent": bot, "spread": result.spread, "spread_ci": result.spread_ci,
+                               "win_rate": result.win_rate, "win_ci": result.win_ci, "score_for": result.score_a,
+                               "score_against": result.score_b, "pairs": result.pairs}, tag=f"eval_vs_{bot}")
+        gate = None
         if self.best_net is None:
             promote, reason = True, "first evaluated network"
         else:
@@ -332,14 +341,37 @@ class Trainer:
                               self.device, sp.max_candidates, sp.max_exchanges)
             results.append(gate)
             self._say("gate: " + gate.line())
-            self._log("gate", {"spread_vs_best": gate.spread, "spread_ci": gate.spread_ci, "best_step": self.best_step})
             # Promote only on a win whose 95% interval excludes zero.
             promote, reason = gate.spread > gate.spread_ci, f"beat best@{self.best_step} by {gate.spread:+.1f} +/- {gate.spread_ci:.1f}"
+            self._log("gate", {"spread": gate.spread, "spread_ci": gate.spread_ci, "win_rate": gate.win_rate,
+                               "best_step": self.best_step, "promoted": bool(promote), "pairs": gate.pairs})
         if promote:
             self.best_net, self.best_step = eval_net, self.step
             atomic_write(self.checkpoint_dir / "best.pt", lambda fh: torch.save(self._model_file(eval_net), fh))
             self._say(f"new best network at step {self.step} ({reason})")
+            if gate is None:
+                self._log("gate", {"spread": None, "spread_ci": None, "win_rate": None, "best_step": self.step,
+                                   "promoted": True, "pairs": 0})
+            self._write_index()
         return results
+
+    def _write_index(self) -> None:
+        """checkpoints/index.json: what the app needs to list this run's models without loading
+        any weights."""
+        files = [{"file": p.name, "step": int(p.stem.split("_")[1]), "size_bytes": p.stat().st_size,
+                  "modified": p.stat().st_mtime} for p in sorted(self.checkpoint_dir.glob("step_*.pt"))]
+        best = self.checkpoint_dir / "best.pt"
+        index = {
+            "network": f"{self.config.model.blocks}x{self.config.model.channels}",
+            "parameters": parameter_count(self.net),
+            "lexicon_id": self.loaded.lexicon_id,
+            "leaves_hash": self.loaded.leaves_hash,
+            "value_scale": self.config.train.value_scale,
+            "checkpoints": files,
+            "best": None if not best.exists() else {"file": "best.pt", "step": self.best_step,
+                                                    "size_bytes": best.stat().st_size, "modified": best.stat().st_mtime},
+        }
+        atomic_write(self.checkpoint_dir / "index.json", lambda fh: fh.write(json.dumps(index, indent=1).encode("utf-8")))
 
     def _model_file(self, net: ValueNet) -> dict:
         """A network on its own, with what is needed to load and trust it."""
@@ -382,6 +414,7 @@ class Trainer:
         for old in kept[: -self.config.train.keep_checkpoints]:
             old.unlink(missing_ok=True)
         self._log("checkpoint", {"file": path.name, "replay_positions": len(self.replay)})
+        self._write_index()
         self._say(f"checkpoint saved: {path}")
         return path
 
@@ -437,6 +470,10 @@ class Trainer:
                   f"replay {self.replay.memory_bytes / 2**30:.1f} GB for {train.replay_capacity:,} positions")
         reason = "finished"
         last_tick = last_report = time.time()
+        running_file = self.run_dir / "running.json"
+        running_file.write_text(json.dumps({"pid": os.getpid(), "started": session_start}), encoding="utf-8")
+        self._log("session", {"event": "start", "parameters": parameter_count(self.net),
+                              "limit_hours": run.hours, "limit_games": run.max_games})
         try:
             if self.phase == "warmstart":
                 finished = self.warm_start(should_stop)
@@ -447,6 +484,8 @@ class Trainer:
                     self.save()
             last_report = last_checkpoint = last_eval = time.time()
             scorer = self._scorer(self.actor_net)
+            if self.phase == "selfplay" and not should_stop():
+                self._log("session", {"event": "selfplay"})
             while True:
                 if should_stop():
                     reason = "STOP file found" if stop_file.exists() else f"time limit of {run.hours} h reached"
@@ -486,7 +525,10 @@ class Trainer:
             self.actor_net.load_state_dict(self.net.state_dict())
             self.evaluate()
         self.save()
+        finished = reason.startswith(("time limit", "game limit"))
+        self._log("session", {"event": "stop", "reason": reason, "finished": finished})
         stop_file.unlink(missing_ok=True)
+        running_file.unlink(missing_ok=True)
         if self.writer is not None:
             self.writer.close()
         self._say(f"done. Resume with: uv run scrabble-ai train --name {run.name} --resume latest")

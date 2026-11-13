@@ -11,9 +11,13 @@ use scrabble_core::board::{Board, LETTER_MULT, SQUARES, WORD_MULT};
 use scrabble_core::encode;
 use scrabble_core::env::{self, Buffers, Controller};
 use scrabble_core::gaddag::Gaddag;
+use scrabble_core::game::Game as CoreGame;
 use scrabble_core::leave;
 use scrabble_core::lexicon::Lexicon;
-use scrabble_core::policy::Bot;
+use scrabble_core::moves::{Move, Placed, Play};
+use scrabble_core::policy::{self, Bot, Candidate, Scratch};
+use scrabble_core::rng::Rng;
+use scrabble_core::validate;
 use scrabble_core::selfplay::{self, Player};
 use scrabble_core::tiles::{Rack, TILE_COUNTS, TILE_TYPES, TILE_VALUES};
 use std::path::PathBuf;
@@ -311,6 +315,25 @@ impl BatchEnv {
         self.check_slot(slot)?;
         Ok(self.env.game(slot).turn)
     }
+
+    /// What each seat did in the game in `slot` so far: lists indexed by seat for `bingos`,
+    /// `exchanges`, `passes`, `placements`, `best_score` and `best_word`, plus `ended_by`
+    /// ("out", "scoreless", or "" while the game is running).
+    fn game_stats<'py>(&self, py: Python<'py>, slot: usize) -> PyResult<Bound<'py, PyDict>> {
+        self.check_slot(slot)?;
+        let (stats, game) = (self.env.stats(slot), self.env.game(slot));
+        let out = PyDict::new(py);
+        let per_seat = |f: fn(&env::SeatStats) -> i64| stats.seats.iter().map(f).collect::<Vec<i64>>();
+        out.set_item("bingos", per_seat(|s| s.bingos as i64))?;
+        out.set_item("exchanges", per_seat(|s| s.exchanges as i64))?;
+        out.set_item("passes", per_seat(|s| s.passes as i64))?;
+        out.set_item("placements", per_seat(|s| s.placements as i64))?;
+        out.set_item("best_score", per_seat(|s| s.best_score as i64))?;
+        let words: Vec<String> = stats.seats.iter().map(|s| s.best_play.map_or(String::new(), |p| p.word_plain())).collect();
+        out.set_item("best_word", words)?;
+        out.set_item("ended_by", ended_by(game))?;
+        Ok(out)
+    }
 }
 
 impl BatchEnv {
@@ -320,6 +343,293 @@ impl BatchEnv {
         } else {
             Err(PyIndexError::new_err(format!("slot {slot} out of range ({} slots)", self.env.len())))
         }
+    }
+}
+
+// ---- Interactive games -------------------------------------------------------------------
+
+/// (row, col, letter, is_blank) for each newly placed tile of a play.
+fn placed_tiles(play: &Play) -> Vec<(usize, usize, String, bool)> {
+    play.placed()
+        .map(|t| (t.index / 15, t.index % 15, ((b'A' + t.letter) as char).to_string(), t.blank))
+        .collect()
+}
+
+/// The parts of a move that do not depend on the game: kind, text, word, position, tiles.
+fn describe_move<'py>(py: Python<'py>, mv: &Move) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    let no_tiles = Vec::<(usize, usize, String, bool)>::new();
+    match mv {
+        Move::Play(play) => {
+            out.set_item("kind", "play")?;
+            out.set_item("text", format!("{} {}", play.position_text(), play.word_text()))?;
+            out.set_item("word", play.word_plain())?;
+            out.set_item("position", play.position_text())?;
+            out.set_item("tiles", placed_tiles(play))?;
+            out.set_item("bingo", play.tiles_played == 7)?;
+            out.set_item("exchanged", "")?;
+        }
+        Move::Exchange(tiles) => {
+            out.set_item("kind", "exchange")?;
+            out.set_item("text", format!("exchange {}", tiles.len()))?;
+            out.set_item("word", "")?;
+            out.set_item("position", "")?;
+            out.set_item("tiles", no_tiles)?;
+            out.set_item("bingo", false)?;
+            out.set_item("exchanged", tiles.to_string())?;
+        }
+        Move::Pass => {
+            out.set_item("kind", "pass")?;
+            out.set_item("text", "pass")?;
+            out.set_item("word", "")?;
+            out.set_item("position", "")?;
+            out.set_item("tiles", no_tiles)?;
+            out.set_item("bingo", false)?;
+            out.set_item("exchanged", "")?;
+        }
+    }
+    Ok(out)
+}
+
+fn ended_by(game: &CoreGame) -> &'static str {
+    if !game.over {
+        ""
+    } else if game.scoreless_turns >= scrabble_core::game::SCORELESS_LIMIT {
+        "scoreless"
+    } else {
+        "out"
+    }
+}
+
+/// One game played move by move, for the board on screen: a person against a model, or two
+/// models being watched. `candidates` offers the moves a player would consider (with the same
+/// afterstate arrays the batched environment writes); `play_tiles` checks and plays a move
+/// entered by a person.
+#[pyclass]
+struct Game {
+    game: CoreGame,
+    gaddag: Arc<Gaddag>,
+    leaves: Arc<leave::LeaveModel>,
+    offered: Vec<Candidate>,
+    seed: u64,
+    /// The baseline bots' random stream, seeded as in matches so a match game replays here.
+    bot_rng: Rng,
+}
+
+/// A candidate as Python sees it: the move, plus `score` (with the going-out bonus), `bonus`
+/// (that bonus alone), `leave`, `leave_value` and `terminal`.
+fn describe_candidate<'py>(py: Python<'py>, candidate: &Candidate) -> PyResult<Bound<'py, PyDict>> {
+    let description = describe_move(py, &candidate.mv)?;
+    description.set_item("score", candidate.score)?;
+    description.set_item("bonus", candidate.score - candidate.mv.score())?;
+    description.set_item("leave", candidate.leave.to_string())?;
+    description.set_item("leave_value", candidate.leave_value)?;
+    description.set_item("terminal", candidate.terminal)?;
+    Ok(description)
+}
+
+fn unseen_dict<'py>(py: Python<'py>, game: &CoreGame, seat: usize) -> PyResult<Bound<'py, PyDict>> {
+    let unseen = PyDict::new(py);
+    for (tile, &count) in game.unseen(seat).iter().enumerate() {
+        if count > 0 {
+            unseen.set_item(scrabble_core::tiles::tile_to_char(tile as u8).to_string(), count)?;
+        }
+    }
+    Ok(unseen)
+}
+
+impl Game {
+    fn apply<'py>(&mut self, py: Python<'py>, mv: Move) -> PyResult<Bound<'py, PyDict>> {
+        let mover = self.game.to_move;
+        let rack_before = self.game.racks[mover];
+        let mut leave = rack_before;
+        leave.remove_all(&mv.tiles_used());
+        let out = describe_move(py, &mv)?;
+        let applied = self.game.apply(&mv);
+        self.offered.clear();
+        out.set_item("player", mover)?;
+        out.set_item("score", applied.score)?;
+        out.set_item("rack", rack_before.to_string())?;
+        out.set_item("leave", leave.to_string())?;
+        out.set_item("adjustment", applied.adjustment.to_vec())?;
+        out.set_item("game_over", applied.game_over)?;
+        Ok(out)
+    }
+}
+
+#[pymethods]
+impl Game {
+    #[new]
+    fn new(engine: &Engine, leaves: &LeaveModel, seed: u64) -> Game {
+        Game {
+            game: CoreGame::new(seed),
+            gaddag: engine.gaddag.clone(),
+            leaves: leaves.model.clone(),
+            offered: Vec::new(),
+            seed,
+            bot_rng: Rng::new(seed ^ 0xB07_5EED),
+        }
+    }
+
+    #[getter]
+    fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The position: `board` (15 strings), `racks`, `scores`, `to_move`, `turn`, `bag`,
+    /// `scoreless_turns`, `can_exchange`, `over`, `ended_by`, `unseen` (tiles the side to
+    /// move cannot see, as letter -> count) and `unseen_by_seat` (the same for each seat).
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let game = &self.game;
+        let out = PyDict::new(py);
+        out.set_item("board", game.board.to_text().lines().map(str::to_string).collect::<Vec<_>>())?;
+        out.set_item("racks", vec![game.racks[0].to_string(), game.racks[1].to_string()])?;
+        out.set_item("scores", game.scores.to_vec())?;
+        out.set_item("to_move", game.to_move)?;
+        out.set_item("turn", game.turn)?;
+        out.set_item("bag", game.bag.len())?;
+        out.set_item("scoreless_turns", game.scoreless_turns)?;
+        out.set_item("can_exchange", game.can_exchange())?;
+        out.set_item("over", game.over)?;
+        out.set_item("ended_by", ended_by(game))?;
+        out.set_item("unseen", unseen_dict(py, game, game.to_move)?)?;
+        out.set_item("unseen_by_seat", vec![unseen_dict(py, game, 0)?, unseen_dict(py, game, 1)?])?;
+        Ok(out)
+    }
+
+    /// The moves the side to move would consider, best static value first, as
+    /// (descriptions, board uint8[k, 225], leave uint8[k, 27], unseen uint8[k, 27],
+    /// meta int16[k, META], leave_value float32[k]). `play_candidate(i)` plays one of them.
+    #[allow(clippy::type_complexity)]
+    fn candidates<'py>(
+        &mut self,
+        py: Python<'py>,
+        max_candidates: usize,
+        max_exchanges: usize,
+    ) -> PyResult<(
+        Vec<Bound<'py, PyDict>>,
+        Bound<'py, numpy::PyArray2<u8>>,
+        Bound<'py, numpy::PyArray2<u8>>,
+        Bound<'py, numpy::PyArray2<u8>>,
+        Bound<'py, numpy::PyArray2<i16>>,
+        Bound<'py, PyArray1<f32>>,
+    )> {
+        if max_candidates < 2 || max_exchanges >= max_candidates {
+            return Err(value_error("need max_candidates >= 2 and max_exchanges < max_candidates".into()));
+        }
+        self.offered.clear();
+        if !self.game.over {
+            let mut scratch = Scratch::default();
+            env::select_candidates(
+                &self.game,
+                &self.gaddag,
+                &self.leaves,
+                &mut scratch,
+                max_candidates,
+                max_exchanges,
+                &mut self.offered,
+            );
+        }
+        let k = self.offered.len();
+        let mut board = vec![0u8; k * SQUARES];
+        let mut leave = vec![0u8; k * TILE_TYPES];
+        let mut unseen = vec![0u8; k * TILE_TYPES];
+        let mut meta = vec![0i16; k * encode::META];
+        let mut leave_value = vec![0f32; k];
+        let base = encode::board_codes(&self.game.board);
+        let pool = self.game.unseen(self.game.to_move);
+        let mut descriptions = Vec::with_capacity(k);
+        for (i, candidate) in self.offered.iter().enumerate() {
+            encode::encode_afterstate(
+                &self.game,
+                &base,
+                &pool,
+                candidate,
+                &mut board[i * SQUARES..(i + 1) * SQUARES],
+                &mut leave[i * TILE_TYPES..(i + 1) * TILE_TYPES],
+                &mut unseen[i * TILE_TYPES..(i + 1) * TILE_TYPES],
+                &mut meta[i * encode::META..(i + 1) * encode::META],
+            );
+            leave_value[i] = candidate.leave_value;
+            descriptions.push(describe_candidate(py, candidate)?);
+        }
+        let bytes = |data: Vec<u8>, width: usize| numpy::ndarray::Array2::from_shape_vec((k, width), data).expect("shape");
+        Ok((
+            descriptions,
+            bytes(board, SQUARES).into_pyarray(py),
+            bytes(leave, TILE_TYPES).into_pyarray(py),
+            bytes(unseen, TILE_TYPES).into_pyarray(py),
+            numpy::ndarray::Array2::from_shape_vec((k, encode::META), meta).expect("shape").into_pyarray(py),
+            leave_value.into_pyarray(py),
+        ))
+    }
+
+    /// The move a baseline bot (`random`, `greedy`, `greedy-leave`) makes for the side to
+    /// move: the same code as in matches and evaluations, and for `random` the same random
+    /// stream for a given game seed, so a match game replays here move for move. Returns its
+    /// index among the offered candidates (call `candidates` first) and, when the move was not
+    /// among them and has been added at the end, its description. Each call for `random`
+    /// advances the stream, so call it once per move actually played.
+    fn bot_choice<'py>(&mut self, py: Python<'py>, bot: &str) -> PyResult<(usize, Option<Bound<'py, PyDict>>)> {
+        let bot = parse_bot(bot)?;
+        if self.game.over {
+            return Err(value_error("the game is over".into()));
+        }
+        let mut scratch = Scratch::default();
+        let mv = policy::choose(bot, &self.game, &self.gaddag, &self.leaves, &mut self.bot_rng, &mut scratch);
+        if let Some(index) = self.offered.iter().position(|candidate| candidate.mv == mv) {
+            return Ok((index, None));
+        }
+        let candidate = policy::candidate(&self.game, &self.leaves, mv);
+        let description = describe_candidate(py, &candidate)?;
+        self.offered.push(candidate);
+        Ok((self.offered.len() - 1, Some(description)))
+    }
+
+    /// Play candidate `index` from the last `candidates` call. Returns the move as a dict.
+    fn play_candidate<'py>(&mut self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyDict>> {
+        let Some(candidate) = self.offered.get(index) else {
+            return Err(PyIndexError::new_err("no such candidate"));
+        };
+        let mv = candidate.mv;
+        self.apply(py, mv)
+    }
+
+    /// Check and play a placement entered by a person: `tiles` are (row, col, letter, is_blank)
+    /// for the newly placed tiles only. Raises ValueError with the reason if it is not legal.
+    fn play_tiles<'py>(&mut self, py: Python<'py>, tiles: Vec<(usize, usize, String, bool)>) -> PyResult<Bound<'py, PyDict>> {
+        if self.game.over {
+            return Err(value_error("the game is over".into()));
+        }
+        let mut placed = Vec::with_capacity(tiles.len());
+        for (row, col, letter, blank) in &tiles {
+            let letter = letter
+                .chars()
+                .next()
+                .filter(char::is_ascii_alphabetic)
+                .ok_or_else(|| value_error("a tile needs a letter A-Z".into()))?;
+            if *row >= 15 || *col >= 15 {
+                return Err(value_error("a tile is off the board".into()));
+            }
+            placed.push(Placed { index: row * 15 + col, letter: letter.to_ascii_uppercase() as u8 - b'A', blank: *blank });
+        }
+        let play = validate::check_placement(&self.gaddag, &self.game.board, &placed).map_err(value_error)?;
+        let mv = Move::Play(play);
+        validate::check_move(&self.gaddag, &self.game, &mv).map_err(value_error)?;
+        self.apply(py, mv)
+    }
+
+    /// Exchange the given tiles (letters, `?` for a blank).
+    fn exchange<'py>(&mut self, py: Python<'py>, tiles: &str) -> PyResult<Bound<'py, PyDict>> {
+        let rack = Rack::parse(tiles).ok_or_else(|| value_error(format!("bad tiles {tiles:?}")))?;
+        let mv = Move::Exchange(rack);
+        validate::check_move(&self.gaddag, &self.game, &mv).map_err(value_error)?;
+        self.apply(py, mv)
+    }
+
+    fn pass_turn<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        validate::check_move(&self.gaddag, &self.game, &Move::Pass).map_err(value_error)?;
+        self.apply(py, Move::Pass)
     }
 }
 
@@ -335,6 +645,7 @@ fn core_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<LeaveModel>()?;
     m.add_class::<BatchEnv>()?;
+    m.add_class::<Game>()?;
     m.add_function(wrap_pyfunction!(board_codes_from_text, m)?)?;
 
     m.add("SQUARES", SQUARES)?;
