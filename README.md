@@ -105,7 +105,8 @@ the command line, [docs/APP.md](docs/APP.md) does the same for the app, and ever
 explained in [configs/train.toml](configs/train.toml).
 
 The app is a web page served on 127.0.0.1 by the Python standard library and shown in its own
-window; it needs nothing beyond what `uv sync` installs, and nothing leaves the machine.
+window (on Windows a see-through glass one); it needs nothing beyond what `uv sync` installs, and
+nothing leaves the machine.
 
 ## Tests
 

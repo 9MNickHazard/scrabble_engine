@@ -42,6 +42,9 @@ the old code. Machine-specific notes, if any, are in `CLAUDE.local.md` (not comm
   on it without touching real runs: `--no-window --port <n> --runs-dir <folder> --data-dir
   <folder>`, and `?mock=1` in the address runs the pages on invented data. Check pages in a real
   browser before calling UI work done. It must stay local: never host it, and no sign-in pages.
+  On Windows it opens in a native see-through window (`app/window.py`, pywebview + WebView2;
+  styles in `static/css/glass.css`, active only with `?glass=1`); `--window edge` is the opaque
+  fallback. Glass can only be judged on a real screen.
 - The essential code (engine, move generation, rules, RL formulation, training loop) is written by
   the lead model; well-specified side tasks go to Opus subagents.
 - The default lexicon is `data/lexicon/NSWL2023.txt`, the NASPA *school* list (195,747 words). A

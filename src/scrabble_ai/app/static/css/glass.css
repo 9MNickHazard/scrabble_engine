@@ -1,0 +1,78 @@
+/* Glass: how the app looks in its native see-through window (see window.py).
+ *
+ * Active only with <html data-glass>, which app.js sets when the address carries ?glass=1.
+ * --glass runs from 0 (solid: the ordinary look) to 1 (clearest); the "See-through" slider in
+ * the sidebar sets it. There are three kinds of surface:
+ *
+ *   the page between panels    nearly clear: the desktop and other windows show through
+ *   panels                     translucent: the sidebar, the top bar, cards and tiles of figures
+ *   things to read or to use   solid: text, outlines, buttons, inputs, menus, dialogs, tooltips,
+ *                              the board, its tiles and the racks
+ *
+ * Outlines are heavier than in the solid look, so every panel keeps its edge whatever is
+ * behind it, and text that sits straight on the glass carries a soft halo of the page colour.
+ */
+
+:root[data-glass] {
+  --glass: 0.6;
+  --glass-page: color-mix(in srgb, var(--page) calc((1 - 0.95 * var(--glass)) * 100%), transparent);
+  --glass-panel: color-mix(in srgb, var(--surface-1) calc((1 - 0.32 * var(--glass)) * 100%), transparent);
+  --glass-rail: color-mix(in srgb, var(--surface-1) calc((1 - 0.22 * var(--glass)) * 100%), transparent);
+  --glass-halo: 0 0 16px var(--page), 0 0 9px var(--page), 0 0 5px var(--page), 0 0 2px var(--page), 0 0 1px var(--page);
+  --border: rgba(255, 255, 255, 0.22);
+  --border-strong: rgba(255, 255, 255, 0.40);
+  --text-muted: #a5a39b;
+}
+
+:root[data-glass][data-theme="light"] {
+  --border: rgba(11, 11, 11, 0.24);
+  --border-strong: rgba(11, 11, 11, 0.44);
+  --text-muted: #605f5a;
+}
+
+/* The three layers a page has: the root, the body and the app grid. Only the body is tinted. */
+:root[data-glass] { background: transparent; }
+:root[data-glass] body { background: var(--glass-page); }
+
+/* A solid line round the whole window's content, inside the system frame. */
+:root[data-glass] #app { box-shadow: inset 0 0 0 1px var(--border-strong); }
+
+:root[data-glass] #sidebar { background: var(--glass-rail); border-right: 1px solid var(--border-strong); }
+:root[data-glass] #topbar { background: var(--glass-rail); border-bottom: 1px solid var(--border-strong); }
+
+:root[data-glass] .card,
+:root[data-glass] .stat {
+  background: var(--glass-panel);
+  border-color: var(--border-strong);
+}
+
+/* Headings and toolbars that would otherwise float on the clear page get a plate of their own. */
+:root[data-glass] :is(.page-head, .run-toolbar, .play-action-row, .watch-bar) {
+  background: var(--glass-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-l);
+  padding: var(--space-3) var(--space-4);
+}
+:root[data-glass] .tabs {
+  background: var(--glass-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-l);
+  padding: var(--space-1) var(--space-3) 0;
+}
+
+/* Text straight on the glass. The halo is inherited, so panels and controls switch it off. */
+:root[data-glass] #view { text-shadow: var(--glass-halo); }
+:root[data-glass] #view :is(.card, .stat, .page-head, .run-toolbar, .play-action-row, .watch-bar, .tabs, .notice, .button, .input, .select, .segmented, .chip, .badge, .log,
+  .board, .rack, .result-card, .blank-picker, table, pre, input, select, textarea, button, svg) { text-shadow: none; }
+:root[data-glass] #view .tab { font-weight: 600; }
+:root[data-glass] .page-head .lede { color: var(--text-primary); }
+
+/* The see-through control at the foot of the sidebar. */
+.nav-glass { display: none; }
+:root[data-glass] .nav-glass {
+  display: grid; gap: 6px; padding: 9px var(--space-3) var(--space-2);
+  color: var(--text-secondary); font-size: var(--text-s);
+}
+.nav-glass-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.nav-glass-value { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.nav-glass input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); cursor: pointer; }

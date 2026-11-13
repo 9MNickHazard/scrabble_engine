@@ -117,6 +117,11 @@ How it was checked:
 The charts and report pages were checked visually against invented long runs, since no real long
 run exists yet. The first real run is their first real test.
 
+The see-through glass window (added last) has **not been seen on a screen**: it was built while
+only headless testing was allowed. Its prerequisites load, its set-up is tested against fakes, and
+its styles were previewed over a picture of a desktop. If the real window disappoints,
+`--window edge` is the opaque window that was checked on screen.
+
 Still to do in this phase:
 
 - `scrabble-ai analyze`: given a board, rack and scores, print ranked moves with their score, leave

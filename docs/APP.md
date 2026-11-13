@@ -15,10 +15,42 @@ uv run scrabble-ai app --install-shortcut   # (re)create the Desktop shortcut
 ```
 
 The app is a small local web server (on 127.0.0.1 only, on a free port) with its pages shown in
-their own window, which is Microsoft Edge without the browser frame. Closing the window ends the
-app. **Training runs and matches are separate processes and keep going with the app closed**;
-the app finds them again the next time it opens. Opening the shortcut while the app is already
-running shows the same app again.
+a window of their own. Closing the window ends the app. **Training runs and matches are separate
+processes and keep going with the app closed**; the app finds them again the next time it opens.
+Opening the shortcut while the app is already running shows the same app again.
+
+### The glass window
+
+On Windows the window is see-through: the desktop and whatever is open behind the app show
+through it. Not everything is glass:
+
+- the **page between panels** is nearly clear;
+- **panels** (the sidebar, the top bar, cards, page headings and toolbars) are translucent, each
+  with a solid outline;
+- everything to **read or use** is solid: text, buttons, inputs, menus, dialogs, the board, its
+  tiles and the racks. The title bar and window frame are the ordinary Windows ones.
+
+The **See-through** slider at the foot of the sidebar sets how clear the glass is, from solid
+(the ordinary look) to almost all the way through; the app remembers it. Clear glass over a busy
+window is harder to read than over a plain one, so slide it down when it gets in the way.
+
+```powershell
+uv run scrabble-ai app --window edge                      # an ordinary, opaque Edge app window instead
+uv run scrabble-ai app --install-shortcut --window edge   # make the Desktop shortcut open that one
+```
+
+How it works, for the curious: a browser window cannot be transparent to the desktop, so the
+pages are shown in a WebView2 control (the engine of Microsoft Edge) inside a native window made
+with [pywebview](https://pywebview.flowrl.com/), and the window is switched to per-pixel
+transparency through the Windows compositor (`src/scrabble_ai/app/window.py`). If that window
+cannot be made, the app opens in an Edge app window as before, and if the transparency itself
+cannot be set up the window is simply opaque.
+
+> **Not yet seen on a screen.** The glass window was built on 2026-11-12 while only headless
+> testing was allowed, so what has been checked is everything short of looking at it: its
+> prerequisites load on this PC, its set-up calls are tested against fakes, and the glass styles
+> were previewed by compositing the pages over a picture of a desktop. This note goes when
+> someone has looked at the real thing.
 
 Before the first training run the project needs a word list and leave values
 (see [TRAINING.md](TRAINING.md)); the app says so at the top if either is missing.
@@ -163,6 +195,7 @@ None of it is in the repository. Deleting a run or a match in the app deletes it
 The pages are plain JavaScript, CSS and SVG in `src/scrabble_ai/app/static/` with no build step,
 and the server is the Python standard library; [APP_API.md](APP_API.md) is the contract between
 them. `uv run scrabble-ai app --no-window --port 8700` serves without opening a window, and
-adding `?mock=1` to the address runs the pages on invented data with no server behind them.
+adding `?mock=1` to the address runs the pages on invented data with no server behind them
+(`?mock=1&glass=1` adds the glass styles, drawn over the browser's own white).
 `--runs-dir` and `--data-dir` point the app at other folders. Tests: `uv run pytest
 tests/test_app_*.py tests/test_insights.py`.

@@ -300,6 +300,7 @@ window.App = (function () {
         h("span", { class: "nav-icon", html: view.icon || "" }), h("span", null, view.title)));
     }
     nav.appendChild(h("div", { class: "nav-spacer" }));
+    if (glass.on) nav.appendChild(glassControl());
     nav.appendChild(h("button", { class: "nav-item nav-theme", type: "button", onclick: toggleTheme,
       title: "Switch between dark and light" },
       h("span", { class: "nav-icon", html: ICON_THEME }), h("span", null, "Theme")));
@@ -313,8 +314,62 @@ window.App = (function () {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem("theme", next); } catch (error) { /* private mode */ }
+    tellWindow("set_theme", next);
     emit("theme", next);
     render();
+  }
+
+  // ---- Glass ----------------------------------------------------------------------------
+  // In its native window (scrabble_ai/app/window.py) the app is see-through: the address carries
+  // ?glass=1, the window's own background is transparent, and css/glass.css makes the page
+  // nearly clear and the panels translucent. `amount` is 0 (solid) to 100 (clearest).
+
+  const glass = { on: false, amount: 60 };
+
+  function setGlassAmount(amount) {
+    glass.amount = Math.max(0, Math.min(100, Math.round(amount)));
+    document.documentElement.style.setProperty("--glass", String(glass.amount / 100));
+    try { localStorage.setItem("glass", String(glass.amount)); } catch (error) { /* private mode */ }
+  }
+
+  function enableGlass() {
+    glass.on = true;
+    document.documentElement.dataset.glass = "on";
+    let saved = NaN;
+    try { saved = Number(localStorage.getItem("glass") ?? NaN); } catch (error) { /* private mode */ }
+    setGlassAmount(Number.isFinite(saved) ? saved : 60);
+  }
+
+  /** The window turned out not to be see-through: go back to the solid look. */
+  function disableGlass() {
+    glass.on = false;
+    delete document.documentElement.dataset.glass;
+    document.documentElement.style.removeProperty("--glass");
+    render();
+  }
+
+  function glassControl() {
+    const value = h("span", { class: "nav-glass-value" }, glass.amount ? glass.amount + "%" : "solid");
+    const range = h("input", { type: "range", min: "0", max: "100", step: "5", value: String(glass.amount),
+      id: "glass-range", "aria-label": "How see-through the window is",
+      oninput: () => {
+        setGlassAmount(Number(range.value));
+        value.textContent = glass.amount ? glass.amount + "%" : "solid";
+      } });
+    return h("div", { class: "nav-glass", title: "How much of the desktop shows through the window" },
+      h("label", { class: "nav-glass-head", for: "glass-range" }, h("span", null, "See-through"), value), range);
+  }
+
+  /** Call a method of the native window, if there is one (see Bridge in window.py). */
+  function tellWindow(method, ...args) {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api[method] !== "function") return Promise.resolve(null);
+    try { return Promise.resolve(api[method](...args)).catch(() => null); } catch (error) { return Promise.resolve(null); }
+  }
+
+  function connectWindow() {
+    tellWindow("set_theme", document.documentElement.dataset.theme);
+    tellWindow("glass_state").then((answer) => { if (answer && answer.ok === false && glass.on) disableGlass(); });
   }
 
   function renderTopbar() {
@@ -448,6 +503,10 @@ window.App = (function () {
       const saved = localStorage.getItem("theme");
       if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
     } catch (error) { /* private mode */ }
+    if (new URLSearchParams(location.search).get("glass") === "1") enableGlass();
+    // The native window announces itself once its bridge is ready.
+    if (window.pywebview && window.pywebview.api) connectWindow();
+    else window.addEventListener("pywebviewready", connectWindow, { once: true });
     if (mock.enabled) {
       for (const file of ["js/mock/training.js", "js/mock/library.js", "js/mock/games.js"]) {
         try { await loadScript(file); } catch (error) { console.warn(error.message); }
@@ -465,5 +524,6 @@ window.App = (function () {
     get status() { return state.status; },
     get route() { return state.route; },
     get theme() { return document.documentElement.dataset.theme; },
+    get glass() { return glass.on ? glass.amount : null; },
   };
 })();

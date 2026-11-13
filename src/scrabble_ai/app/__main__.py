@@ -1,11 +1,15 @@
 """Scrabble Lab, the desktop app: `python -m scrabble_ai.app` (or `uv run scrabble-ai app`).
 
-Starts the local server and opens the UI in its own window (Microsoft Edge in app mode, which
-is on every Windows 11 machine; the default browser otherwise). Closing the window ends the
-app. Training runs and matches started from it are separate processes and keep going; the app
-finds them again the next time it opens.
+Starts the local server and opens the UI in its own window. On Windows that is a native window
+with a see-through glass background (see window.py); `--window edge` uses an ordinary Microsoft
+Edge app window instead, which is also the fallback if the glass window cannot be made, and the
+default browser is the last resort. Closing the window ends the app. Training runs and matches
+started from it are separate processes and keep going; the app finds them again the next time
+it opens.
 
     --install-shortcut   put a "Scrabble Lab" shortcut on the Desktop and exit
+    --window glass|edge  which kind of window (default: glass on Windows); with
+                         --install-shortcut, the kind the shortcut opens
     --no-window          serve only and print the address (for development)
     --port N             use a fixed port instead of a free one
     --runs-dir PATH      look for training runs here instead of runs/ (for demos and tests)
@@ -22,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -65,6 +70,38 @@ def open_window(url: str) -> subprocess.Popen | None:
                              "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"])
 
 
+def default_window() -> str:
+    """`glass` on Windows unless SCRABBLE_LAB_WINDOW says otherwise."""
+    chosen = os.environ.get("SCRABBLE_LAB_WINDOW", "").strip().lower()
+    if chosen in ("glass", "edge"):
+        return chosen
+    return "glass" if os.name == "nt" else "edge"
+
+
+def show(url: str, mode: str) -> bool:
+    """Show the app at `url` and return when its window is closed. False means no window of our
+    own could be opened (the address went to the default browser, which we cannot wait for)."""
+    if mode == "glass":
+        try:
+            from scrabble_ai.app import window as glass
+
+            icon = APP_DIR / "scrabble-lab.ico"
+            if not icon.exists():
+                make_icon(icon)
+            glass.run(url, APP_DIR / "webview", icon)
+            return True
+        except Exception as error:  # GlassUnavailable, or anything pywebview raises on the way up
+            print(f"the glass window could not be opened ({type(error).__name__}: {error}); "
+                  f"using an Edge window instead", flush=True)
+            if type(error).__name__ != "GlassUnavailable":
+                traceback.print_exc()
+    process = open_window(url)
+    if process is None:
+        return False
+    process.wait()
+    return True
+
+
 def running_instance() -> str | None:
     """The address of an app that is already running, if there is one."""
     try:
@@ -100,8 +137,10 @@ def make_icon(path: Path) -> bool:
     return True
 
 
-def install_shortcut() -> Path:
-    """Create "Scrabble Lab.lnk" on the Desktop, pointing at this environment's pythonw."""
+def install_shortcut(window: str | None = None) -> Path:
+    """Create "Scrabble Lab.lnk" on the Desktop, pointing at this environment's pythonw.
+    `window` fixes the kind of window the shortcut opens; None leaves it to the default."""
+    arguments = "-m scrabble_ai.app" + (f" --window {window}" if window in ("glass", "edge") else "")
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     if not pythonw.exists():
         pythonw = Path(sys.executable)
@@ -113,7 +152,7 @@ def install_shortcut() -> Path:
         "$shell = New-Object -ComObject WScript.Shell; "
         "$link = $shell.CreateShortcut($path); "
         f"$link.TargetPath = '{pythonw}'; "
-        "$link.Arguments = '-m scrabble_ai.app'; "
+        f"$link.Arguments = '{arguments}'; "
         f"$link.WorkingDirectory = '{REPO_ROOT}'; "
         "$link.Description = 'Scrabble Lab: train, watch and play the Scrabble models'; "
         + (f"$link.IconLocation = '{icon}'; " if has_icon else "")
@@ -127,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scrabble-ai app", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--install-shortcut", action="store_true")
     parser.add_argument("--no-window", action="store_true")
+    parser.add_argument("--window", choices=["glass", "edge"], default=None)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--runs-dir", type=Path, default=None)
     parser.add_argument("--data-dir", type=Path, default=None)
@@ -134,16 +174,15 @@ def main(argv: list[str] | None = None) -> int:
     _redirect_output()
 
     if args.install_shortcut:
-        print(f"shortcut created: {install_shortcut()}")
+        print(f"shortcut created: {install_shortcut(args.window)}")
         return 0
 
+    mode = args.window or default_window()
     custom = args.runs_dir is not None or args.data_dir is not None
     existing = None if custom else running_instance()
     if existing and not args.no_window:
         # Already running (perhaps with its window closed by accident): just show it again.
-        window = open_window(existing)
-        if window is not None:
-            window.wait()
+        show(existing, mode)
         return 0
 
     from scrabble_ai.app.runs import RUNS_DIR
@@ -163,12 +202,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.no_window:
             thread.join()
-        else:
-            window = open_window(url)
-            if window is None:
-                thread.join()  # no app window to wait for: serve until the process is ended
-            else:
-                window.wait()
+        elif not show(url, mode):
+            thread.join()  # no window of our own to wait for: serve until the process is ended
     except KeyboardInterrupt:
         pass
     finally:
