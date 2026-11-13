@@ -6,11 +6,13 @@
  * a special layout; any other non-advanced field is shown with them in the generic style). The
  * rest live under "All settings". `step` is how far the arrow keys move; `multiple_of` is a rule.
  *
- * This file also defines window.LabKit, a few helpers shared with views/models.js: icons, the
- * spread cell with its significance marker, sortable headers and a popover menu.
+ * This file also defines window.LabKit, a few helpers shared with the other views (models, run,
+ * overview, guide): icons, the spread cell with its significance marker, sortable headers, a
+ * popover menu, the health chip and strength sparkline of a run, the rename dialog, and the
+ * "what turning it down or up does" lines of a setting.
  *
  * Mock-only demo states (with ?mock=1):
- *   #/training?demo=multi | settings | search | errors | noleaves | resume | compare | delete | stop
+ *   #/training?demo=multi | settings | search | errors | noleaves | resume | compare | delete | stop | rename
  */
 
 window.LabKit = (function () {
@@ -47,6 +49,12 @@ window.LabKit = (function () {
     training: '<path d="M3 15.5l4.2-5 3.2 2.8L16.5 5.5"/><path d="M12.5 5.5h4v4"/>',
     models: '<path d="M10 2.8l6.6 3.6v7.2L10 17.2l-6.6-3.6V6.4z"/><path d="M3.6 6.5L10 10l6.4-3.5M10 10v7"/>',
     layers: '<path d="M10 3.5l7 3.6-7 3.6-7-3.6z"/><path d="M3 10.4l7 3.6 7-3.6M3 13.6l7 3.6 7-3.6"/>',
+    chart: '<path d="M3.5 16.5h13"/><path d="M4.5 13l3.6-4.1 3 2.6 4.4-6"/>',
+    book: '<path d="M10 6.2C8.6 5 6.4 4.6 3.5 4.8v10c2.9-.2 5.1.2 6.5 1.4 1.4-1.2 3.6-1.6 6.5-1.4v-10c-2.9-.2-5.1.2-6.5 1.4z"/><path d="M10 6.2v10"/>',
+    trendUp: '<path d="M3 14.5l4.8-4.8 3 3L17 6.5"/><path d="M12.5 6.5H17V11"/>',
+    trendDown: '<path d="M3 5.5l4.8 4.8 3-3L17 13.5"/><path d="M12.5 13.5H17V9"/>',
+    equals: '<path d="M5 8h10M5 12h10"/>',
+    arrowDown: '<path d="M10 4v11.5M5.5 11l4.5 4.5 4.5-4.5"/>',
   };
 
   function svg(name, size = 16) {
@@ -210,7 +218,201 @@ window.LabKit = (function () {
     return current !== null;
   }
 
-  return { svg, icon, significance, spread, spreadLegend, approx, sortHeader, compareBy, menu, toggleMenu, closeMenu, isMenuOpen };
+  // ---- How a run went: the health chip and the strength sparkline --------------------------
+
+  /** run.health.state -> label, tone (a reserved status colour, or neutral) and icon. */
+  const HEALTH = {
+    ahead: { label: "Beats the baseline", tone: "good", icon: "trendUp" },
+    level: { label: "Level with the baseline", tone: "level", icon: "equals" },
+    behind: { label: "Behind the baseline", tone: "warning", icon: "arrowDown" },
+    worse: { label: "Got worse", tone: "critical", icon: "trendDown" },
+  };
+  const HEALTH_ORDER = { ahead: 0, level: 1, behind: 2, worse: 3 };
+
+  /** The verdict on a run as a chip, its sentence as the tooltip. null for no verdict. */
+  function healthChip(health, extraClass) {
+    if (!health || !HEALTH[health.state]) return null;
+    const meta = HEALTH[health.state];
+    return h("span", { class: "hl-chip hl-" + meta.tone + (extraClass ? " " + extraClass : ""),
+      title: health.note ? App.fmt.prose(health.note) : meta.label },
+    icon(meta.icon, 14), h("span", null, meta.label));
+  }
+
+  /** run.trend as a sparkline against zero, with each evaluation's interval as a band.
+   *  Returns {node, chart}; chart is null when there is nothing to draw. */
+  function trendSpark(run, options = {}) {
+    const t = run && run.trend;
+    const node = h("span", { class: "hl-spark" });
+    if (!t || !Array.isArray(t.games) || !Array.isArray(t.spread) || !t.games.length) return { node, chart: null };
+    const points = [];
+    const band = [];
+    t.games.forEach((games, i) => {
+      const spread = t.spread[i];
+      if (typeof games !== "number" || typeof spread !== "number") return;
+      points.push([games, spread]);
+      const ci = Array.isArray(t.ci) ? t.ci[i] : null;
+      if (typeof ci === "number") band.push([games, spread - ci, spread + ci]);
+    });
+    if (!points.length) return { node, chart: null };
+    const chart = Charts.sparkline(node, Object.assign({
+      points, band, referenceY: 0, width: 112, height: 30, color: "var(--series-1)",
+      format: (v) => fmt.signed(v) + " a game", xFormat: (v) => fmt.compact(v) + " games",
+      label: `Spread against greedy + leave at each of ${points.length} evaluations; the latest is ${fmt.signed(points[points.length - 1][1])}`,
+    }, options));
+    return { node, chart };
+  }
+
+  // ---- Renaming a run (and so its models) ---------------------------------------------------
+
+  const NAME_RULE = /^[A-Za-z0-9_-]+$/;
+
+  /** Why a run cannot be renamed now, or null when it can. */
+  function renameBlocked(run) {
+    if (!run) return null;
+    if (run.status === "running") return "Stop the run before renaming it.";
+    if (run.status === "stopping") return "The run is stopping; rename it once it has stopped.";
+    if (run.status === "queued") return "Take the run out of the queue before renaming it.";
+    return null;
+  }
+
+  function modelsSentence(count) {
+    const tail = " Matches already played keep working.";
+    if (count === null || count === undefined) return "Renames the run folder and all of its models." + tail;
+    if (count === 0) return "Renames the run folder. It has no saved models yet.";
+    if (count === 1) return "Renames the run folder and its one model." + tail;
+    return `Renames the run folder and all ${count} of its models.` + tail;
+  }
+
+  /** The shared rename dialog.
+   *  name: the run's name. run: its summary, if the caller has it. names: every run name, if
+   *  the caller has them (else they are fetched). modelCount: how many models it has, if known.
+   *  fromModels: opened from the Models page, so the dialog explains that models follow their run.
+   *  onRenamed(newName, summary): after the server has renamed it. */
+  function renameDialog({ name, run = null, names = null, modelCount = null, fromModels = false, onRenamed = null }) {
+    let taken = names ? new Set(names.map((n) => n.toLowerCase())) : null;
+    let summary = run;
+    let serverMessage = null;
+    let busy = false;
+    const input = h("input", { class: "input rn-input", id: "rn-name", type: "text", value: name, spellcheck: "false",
+      autocomplete: "off", maxlength: 64, "aria-describedby": "rn-msg rn-effect" });
+    const msg = h("div", { class: "rn-msg", id: "rn-msg", role: "alert" });
+    const effect = h("p", { class: "rn-effect", id: "rn-effect" });
+    const example = h("strong", null, name);
+    const go = h("button", { type: "button", class: "button button-primary" }, icon("pencil", 14), "Rename");
+    const cancel = h("button", { type: "button", class: "button" }, "Cancel");
+    const content = h("div", { class: "rn" },
+      fromModels ? h("p", { class: "rn-lede" }, "Models are named after the run that trained them, so this renames the run and every model it saved: ",
+        h("strong", null, `${name} (best)`), " becomes ", h("strong", null, example, " (best)"), ".") : null,
+      h("div", { class: "rn-current" }, h("span", { class: "field-label" }, "Current name"), h("span", { class: "rn-current-name" }, name)),
+      h("div", { class: "field" }, h("label", { class: "field-label", for: "rn-name" }, "New name"), input, msg),
+      effect,
+      h("div", { class: "modal-actions" }, cancel, go));
+
+    const problem = (value) => {
+      const v = value.trim();
+      if (!v) return "Give the run a name.";
+      if (!NAME_RULE.test(v)) return "Use only letters, digits, - and _.";
+      if (v === name) return "That is its name already.";
+      if (taken && v.toLowerCase() !== name.toLowerCase() && taken.has(v.toLowerCase())) return "A run with this name already exists.";
+      return null;
+    };
+    const refresh = () => {
+      const blocked = renameBlocked(summary);
+      const v = input.value.trim();
+      const bad = blocked || serverMessage || problem(v);
+      // "That is its name already" is the starting state, not a mistake: no red for it.
+      const quiet = !blocked && !serverMessage && v === name;
+      msg.hidden = !bad || quiet;
+      if (bad && !quiet) msg.replaceChildren(icon("alert", 14), h("span", null, bad));
+      input.classList.toggle("is-error", !!bad && !quiet);
+      go.disabled = busy || !!bad;
+      example.textContent = v && NAME_RULE.test(v) && v !== name ? v : "…";
+      const count = modelCount !== null && modelCount !== undefined ? modelCount
+        : summary ? (summary.checkpoints || 0) + (summary.has_best ? 1 : 0) : null;
+      effect.textContent = modelsSentence(count);
+    };
+    const submit = async () => {
+      if (busy || go.disabled) return;
+      const to = input.value.trim();
+      busy = true;
+      go.disabled = true;
+      go.lastChild.textContent = "Renaming…";
+      try {
+        const result = await App.post(`/api/runs/${encodeURIComponent(name)}/rename`, { name: to });
+        close();
+        App.toast(`Renamed ${name} to ${to}.`, "good");
+        if (onRenamed) onRenamed(to, result);
+      } catch (error) {
+        busy = false;
+        go.lastChild.textContent = "Rename";
+        const text = String(error.message || error).trim();
+        serverMessage = text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".");
+        refresh();
+      }
+    };
+    input.addEventListener("input", () => { serverMessage = null; refresh(); });
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } });
+    go.addEventListener("click", submit);
+    const close = App.modal({ title: fromModels ? "Rename run" : `Rename ${name}`, content });
+    cancel.addEventListener("click", close);
+    refresh();
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+    // The names of the other runs (for the live check) and this run's state, when not given.
+    if (!taken || !summary) {
+      App.get("/api/runs").then((data) => {
+        const list = (data && data.runs) || [];
+        if (!taken) taken = new Set(list.map((r) => r.name.toLowerCase()));
+        if (!summary) summary = list.find((r) => r.name === name) || null;
+        if (content.isConnected) refresh();
+      }).catch(() => { /* the server checks the name anyway */ });
+    }
+    return close;
+  }
+
+  // ---- Settings: what turning one down or up does ------------------------------------------
+
+  /** [[label, sentence], ...] for a field's effects: Lower/Higher, Off/On for a switch, and the
+   *  two option names for a two-way choice. Empty sentences are left out. When the server's
+   *  sentence already starts with its label ("Off: nothing stops…", "cuda: the GPU."), the label
+   *  is taken from the sentence rather than said twice. */
+  function effectRows(field) {
+    return [effectSide(field, "lower"), effectSide(field, "higher")].filter(Boolean);
+  }
+
+  /** One side of a field's effects as [label, sentence], or null when the server gives none. */
+  function effectSide(field, which) {
+    const e = field && field.effects;
+    const text = e && typeof e[which] === "string" ? e[which].trim() : "";
+    if (!text) return null;
+    let labels = ["Lower", "Higher"];
+    if (field.type === "bool") labels = ["Off", "On"];
+    else if (field.type === "choice" && Array.isArray(field.options) && field.options.length === 2) labels = field.options.map(String);
+    const label = labels[which === "lower" ? 0 : 1];
+    const lead = text.match(/^([^\s:]{1,24}):\s+/);
+    if (lead && lead[1].toLowerCase() === label.toLowerCase()) return [label, text.slice(lead[0].length)];
+    return [label, text];
+  }
+
+  /** Everything a search over settings should look at in a field's effects. */
+  function effectsText(field) {
+    const e = (field && field.effects) || {};
+    return [e.lower, e.higher, e.typical].filter((t) => typeof t === "string").join(" ");
+  }
+
+  /** The quiet "Lower: … / Higher: … / Typical: …" lines under a setting's help. */
+  function effectLines(field) {
+    const rows = effectRows(field);
+    const typical = field && field.effects && typeof field.effects.typical === "string" ? field.effects.typical.trim() : "";
+    if (!rows.length && !typical) return null;
+    return h("div", { class: "tm-effects" },
+      rows.map(([label, text]) => h("p", { class: "tm-effect" }, h("span", { class: "tm-effect-k" }, label + ":"), " ", text)),
+      typical ? h("p", { class: "tm-effect" }, h("span", { class: "tm-effect-k" }, "Typical:"), " ", typical) : null);
+  }
+
+  return {
+    svg, icon, significance, spread, spreadLegend, approx, sortHeader, compareBy, menu, toggleMenu, closeMenu, isMenuOpen,
+    HEALTH, HEALTH_ORDER, healthChip, trendSpark, renameBlocked, renameDialog, effectRows, effectSide, effectsText, effectLines,
+  };
 })();
 
 (function () {
@@ -235,18 +437,21 @@ window.LabKit = (function () {
   const PHASES = { warmstart: "Warm start", pretraining: "Pretraining", selfplay: "Self-play" };
   const evalOf = (run, opponent) => (run.latest_eval && run.latest_eval[opponent]) || null;
   const spreadOf = (run, opponent) => { const e = evalOf(run, opponent); return e ? e.spread : null; };
+  // To fit a 1440 px window with the verdict and the strength sparkline added, some columns
+  // share a cell: the network size sits under the run's name (a name need not say the size), the
+  // verdict under the status, the result against greedy under the one against greedy + leave,
+  // games per second under the games, and the time of the last update under the time trained.
   const COLUMNS = [
-    { key: "name", label: "Run", dir: 1, get: (r) => r.name.toLowerCase() },
-    { key: "status", label: "Status", dir: 1, get: (r) => (STATUS[r.status] ? STATUS[r.status].order : 9) },
-    { key: "network", label: "Network", dir: -1, get: (r) => r.parameters },
-    { key: "games", label: "Games", num: true, dir: -1, get: (r) => r.games },
-    { key: "hours", label: "Time", num: true, dir: -1, get: (r) => r.hours, title: "Time trained" },
-    { key: "rate", label: "Games/s", num: true, dir: -1, get: (r) => r.games_per_second },
+    { key: "name", label: "Run", dir: 1, get: (r) => r.name.toLowerCase(),
+      title: "Click a row, or its Charts button, for the run's page: every chart, the report, settings, log and checkpoints" },
+    { key: "status", label: "Status and verdict", dir: 1, get: (r) => (STATUS[r.status] ? STATUS[r.status].order : 9),
+      title: "Where the run is, and below it the verdict on how it went against greedy + leave (hover a verdict for the reason)" },
+    { key: "trend", label: "Strength", sortable: false, cls: "tm-trend-cell",
+      title: "Every evaluation against greedy + leave, oldest first, with its 95% interval shaded. The grey line is zero: level with the bot." },
     { key: "gl", label: "vs greedy-leave", num: true, dir: -1, get: (r) => spreadOf(r, "greedy-leave"),
-      title: "Average spread a game against the greedy + leave bot at the latest evaluation, ± its 95% interval" },
-    { key: "g", label: "vs greedy", num: true, dir: -1, get: (r) => spreadOf(r, "greedy"),
-      title: "Average spread a game against the greedy bot at the latest evaluation, ± its 95% interval" },
-    { key: "updated", label: "Updated", num: true, dir: -1, get: (r) => r.updated },
+      title: "Average spread a game against the greedy + leave bot at the latest evaluation, ± its 95% interval; below it, the same against greedy" },
+    { key: "games", label: "Games", num: true, dir: -1, get: (r) => r.games, title: "Self-play games, and games per second at the last measurement" },
+    { key: "hours", label: "Time", num: true, dir: -1, get: (r) => r.hours, title: "Time trained, and when the run last reported" },
   ];
   const FILTERS = [["all", "All"], ["active", "Active"], ["finished", "Finished"], ["stopped", "Stopped"], ["failed", "Failed"]];
 
@@ -258,7 +463,7 @@ window.LabKit = (function () {
   const hist = { filter: "all", text: "", sort: null, dir: -1, selected: new Set() };
 
   App.registerView("training", {
-    title: "Training", nav: true, order: 20, covers: ["run"], icon: K.svg("training", 18), mount,
+    title: "Training", nav: true, order: 20, covers: ["run", "guide"], icon: K.svg("training", 18), mount,
   });
 
   // ---- Schema and values ----------------------------------------------------------------
@@ -530,7 +735,9 @@ window.LabKit = (function () {
           h("p", { class: "lede" }, "Start training runs, one at a time or several to compare, and look back at every run so far.")),
         h("div", { class: "page-actions" },
           h("button", { type: "button", class: "button button-ghost", onclick: () => historyHost.scrollIntoView({ behavior: "smooth", block: "start" }) },
-            K.icon("clock", 16), "History"))),
+            K.icon("clock", 16), "History"),
+          h("a", { class: "button button-ghost", href: "#/guide?from=training", title: "Every setting: what it does, and what turning it down or up does" },
+            K.icon("book", 16), "Tuning guide"))),
       formHost, historyHost);
     container.appendChild(page);
 
@@ -860,15 +1067,16 @@ window.LabKit = (function () {
         "aria-controls": "tm-all-body", onclick: () => { draft.showAll = !draft.showAll; renderEditor(); } },
       K.icon("chevron", 16, "tm-chev"), "All settings");
       const head = h("div", { class: "tm-all-head" }, toggle, refs.allCount, refs.allErrors,
-        h("span", { class: "tm-all-summary" }, `${fields.length} more in ${sectionCount} sections`));
+        h("span", { class: "tm-all-summary" }, `${fields.length} more in ${sectionCount} sections · `,
+          h("a", { href: "#/guide?from=training", title: "Every setting in one table: what it does, lower, higher, typical range" }, "tuning guide")));
       const wrap = h("div", { class: "tm-all" + (draft.showAll ? " is-open" : "") }, head);
       refs.sections = [];
       refs.noMatch = null;
       refs.resetAll = null;
       if (!draft.showAll) return wrap;
 
-      const search = h("input", { class: "input", type: "search", placeholder: "Search by name, key or help", value: draft.search,
-        "aria-label": "Search settings" });
+      const search = h("input", { class: "input", type: "search", placeholder: "Search names, help and effects", value: draft.search,
+        "aria-label": "Search settings by name, key, help or effect" });
       search.addEventListener("input", () => { draft.search = search.value; applySearch(); });
       refs.resetAll = h("button", { type: "button", class: "button button-small button-ghost",
         onclick: () => { for (const f of fields) run.values[f.key] = f.default; onValue(run, null); renderEditor(); } },
@@ -905,7 +1113,8 @@ window.LabKit = (function () {
             h("label", { class: "tm-setting-label", for: id }, field.label),
             field.locked_on_resume ? h("span", { class: "tm-lock", title: "Fixed for the life of the run: it cannot be changed when resuming" }, K.icon("lock", 12)) : null,
             h("code", { class: "tm-key" }, field.key)),
-          field.help ? h("p", { class: "tm-setting-help" }, field.help) : null),
+          field.help ? h("p", { class: "tm-setting-help" }, field.help) : null,
+          K.effectLines(field)),
         h("div", { class: "tm-setting-control" }, control.node, err, meta));
       controls[field.key] = Object.assign(control, { field, err, meta, row, kind: "row", metaValue: undefined });
       return row;
@@ -918,7 +1127,7 @@ window.LabKit = (function () {
       for (const section of refs.sections) {
         let any = false;
         for (const field of section.fields) {
-          const hay = `${field.label} ${field.key} ${field.help || ""}`.toLowerCase();
+          const hay = `${field.label} ${field.key} ${field.help || ""} ${K.effectsText(field)}`.toLowerCase();
           const match = !q || hay.includes(q);
           controls[field.key].row.hidden = !match;
           if (match) { any = true; shown += 1; }
@@ -927,7 +1136,7 @@ window.LabKit = (function () {
       }
       refs.noMatch.hidden = shown > 0;
       refs.noMatch.replaceChildren(h("strong", null, `No setting matches “${draft.search.trim()}”.`),
-        h("span", null, "Search looks at the label, the key and the help text."));
+        h("span", null, "Search looks at the label, the key, the help text and what turning a setting down or up does."));
     }
 
     /** Update error and changed markers, and everything derived from the values. */
@@ -1349,9 +1558,14 @@ window.LabKit = (function () {
           h("button", { type: "button", class: "button button-small", onclick: () => { hist.filter = "all"; hist.text = ""; buildHistory(); renderHistory(); } }, "Show every run")));
         return;
       }
-      refs.table.replaceChildren(h("table", { class: "table tm-table" },
+      for (const chart of refs.sparks || []) chart.destroy();
+      refs.sparks = [];
+      refs.table.replaceChildren(h("table", { class: "table tm-table tm-history-table" },
         h("thead", null, h("tr", null, h("th", { class: "tm-check" }, h("span", { class: "tm-sr" }, "Select to compare")),
-          COLUMNS.map((c) => K.sortHeader(c, hist, onSort)), h("th", { class: "tm-actions-cell" }, h("span", { class: "tm-sr" }, "Actions")))),
+          COLUMNS.map((c) => (c.sortable === false
+            ? h("th", { class: c.cls || null, scope: "col", title: c.title || null }, c.label)
+            : K.sortHeader(c, hist, onSort))),
+          h("th", { class: "tm-actions-cell" }, h("span", { class: "tm-sr" }, "Actions")))),
         h("tbody", null, list.map(historyRow))));
     }
 
@@ -1360,7 +1574,8 @@ window.LabKit = (function () {
       const href = "#/run/" + enc(run.name);
       const stop = (event) => event.stopPropagation();
       const checked = hist.selected.has(run.name);
-      const tr = h("tr", { class: "clickable" + (ACTIVE.has(run.status) ? " tm-row-active" : "") + (checked ? " is-checked" : ""),
+      const tr = h("tr", { class: "clickable tm-run-row" + (ACTIVE.has(run.status) ? " tm-row-active" : "") + (checked ? " is-checked" : ""),
+        title: `Open ${run.name}: charts, report, settings, log and checkpoints`,
         onclick: (event) => { if (!window.getSelection().toString()) App.go(href); else event.preventDefault(); } });
       const box = h("input", { type: "checkbox", checked, "aria-label": `Select ${run.name} to compare` });
       box.addEventListener("change", () => {
@@ -1368,22 +1583,49 @@ window.LabKit = (function () {
         tr.classList.toggle("is-checked", box.checked);
         renderCompareButton();
       });
+      const spark = K.trendSpark(run);
+      if (spark.chart) refs.sparks.push(spark.chart);
+      const rate = run.games_per_second;
       tr.append(
-        h("td", { class: "tm-check", onclick: stop }, box),
-        h("td", { class: "tm-name-cell" }, h("a", { class: "tm-run-link", href, onclick: stop }, run.name), nameSubline(run)),
-        h("td", null, h("span", { class: "badge" + (status.tone ? " badge-" + status.tone : "") }, status.label),
-          run.status === "running" && run.phase ? h("span", { class: "tm-sub" }, PHASES[run.phase] || run.phase) : null),
-        h("td", null, h("span", { class: "tm-net" }, run.network || "–"),
-          run.parameters ? h("span", { class: "tm-sub" }, `${fmt.compact(run.parameters)} parameters`) : null),
-        h("td", { class: "num", title: run.games !== null && run.games !== undefined ? `${fmt.int(run.games)} games` : null }, fmt.compact(run.games)),
+        h("td", { class: "tm-check", onclick: stop, title: "" }, box),
+        h("td", { class: "tm-name-cell" },
+          h("a", { class: "tm-run-link", href, onclick: stop }, run.name, K.icon("chevron", 13, "tm-run-link-go")),
+          h("span", { class: "tm-sub" }, h("span", { class: "tm-net" }, run.network || "–"),
+            run.parameters ? ` · ${fmt.compact(run.parameters)} parameters` : ""),
+          nameSubline(run)),
+        h("td", { class: "tm-status-cell" },
+          h("div", { class: "tm-status-line" }, h("span", { class: "badge" + (status.tone ? " badge-" + status.tone : "") }, status.label),
+            run.status === "running" && run.phase ? h("span", { class: "tm-sub" }, PHASES[run.phase] || run.phase) : null),
+          healthCell(run)),
+        h("td", { class: "tm-trend-cell" }, spark.chart ? spark.node
+          : h("span", { class: "tm-sub" }, run.trend && Array.isArray(run.trend.games) ? (run.status === "queued" ? "" : "no evaluation yet") : "–")),
+        h("td", { class: "num" }, K.spread(evalOf(run, "greedy-leave"), "greedy-leave"), greedyLine(run)),
+        h("td", { class: "num", title: run.games !== null && run.games !== undefined ? `${fmt.int(run.games)} games` : null }, fmt.compact(run.games),
+          rate ? h("span", { class: "tm-sub" }, `${fmt.fixed(rate, 1)}/s`) : null),
         h("td", { class: "num" }, run.hours ? fmt.duration(run.hours) : "–",
-          ACTIVE.has(run.status) && run.limit && run.limit.hours ? h("span", { class: "tm-sub" }, `of ${fmt.duration(run.limit.hours).replace(/ 00 m$/, "")}`) : null),
-        h("td", { class: "num" }, run.games_per_second ? fmt.fixed(run.games_per_second, 1) : h("span", { class: "muted" }, "–")),
-        h("td", { class: "num" }, K.spread(evalOf(run, "greedy-leave"), "greedy-leave")),
-        h("td", { class: "num" }, K.spread(evalOf(run, "greedy"), "greedy")),
-        h("td", { class: "num secondary nowrap", title: fmt.datetime(run.updated) }, fmt.ago(run.updated)),
-        h("td", { class: "tm-actions-cell", onclick: stop }, rowActions(run)));
+          ACTIVE.has(run.status)
+            ? (run.limit && run.limit.hours ? h("span", { class: "tm-sub" }, `of ${fmt.duration(run.limit.hours).replace(/ 00 m$/, "")}`) : null)
+            : h("span", { class: "tm-sub", title: `Last report ${fmt.datetime(run.updated)}` }, fmt.ago(run.updated))),
+        h("td", { class: "tm-actions-cell", onclick: stop, title: "" }, rowActions(run)));
       return tr;
+    }
+
+    /** The verdict chip, or why there is none. An older server sends no verdict: nothing then. */
+    function healthCell(run) {
+      const chip = K.healthChip(run.health, "tm-health");
+      if (chip) return chip;
+      if (run.health === undefined || run.status === "queued") return null;
+      return h("span", { class: "tm-sub tm-health" }, run.status === "running" || run.status === "stopping" ? "First evaluation to come" : "Never evaluated");
+    }
+
+    /** The latest result against greedy, small, under the one against greedy + leave. */
+    function greedyLine(run) {
+      const e = evalOf(run, "greedy");
+      if (!e || e.spread === null || e.spread === undefined) return null;
+      const sig = K.significance(e);
+      return h("span", { class: "tm-sub tm-greedy-line", title: `Against greedy at the latest evaluation, ± its 95% interval` +
+        (sig === "up" ? ": significantly better" : sig === "down" ? ": significantly worse" : "") },
+      "greedy ", fmt.spread(e.spread, e.ci));
     }
 
     function nameSubline(run) {
@@ -1404,7 +1646,8 @@ window.LabKit = (function () {
     }
 
     function rowActions(run) {
-      const items = [];
+      const items = [h("a", { class: "button button-small button-primary tm-charts", href: "#/run/" + enc(run.name),
+        title: `${run.name}'s charts: strength, learning, self-play, and its report` }, K.icon("chart", 14), "Charts")];
       if (run.status === "running") {
         items.push(h("button", { type: "button", class: "button button-small", onclick: () => stopRun(run) }, K.icon("stop", 13), "Stop"));
       } else if (run.status === "queued") {
@@ -1416,11 +1659,25 @@ window.LabKit = (function () {
           title: run.checkpoints ? `Train ${run.name} some more from its newest checkpoint` : "No checkpoint to resume from",
           onclick: () => openResume(run) }, K.icon("resume", 13), "Resume"));
       }
+      const blocked = K.renameBlocked(run);
+      items.push(h("span", { class: "tm-tip", title: blocked || `Rename ${run.name}, and with it its models` },
+        h("button", { type: "button", class: "button button-small", disabled: !!blocked, "aria-label": `Rename ${run.name}`,
+          onclick: () => renameRun(run) }, K.icon("pencil", 13), "Rename")));
       const busy = run.status === "running" || run.status === "stopping";
       items.push(h("button", { type: "button", class: "button button-small button-ghost tm-iconbtn", disabled: busy,
         "aria-label": `Delete ${run.name}`, title: busy ? "Stop the run before deleting it" : `Delete ${run.name}`,
         onclick: () => deleteRun(run) }, K.icon("trash", 15)));
       return h("div", { class: "tm-actions" }, items);
+    }
+
+    function renameRun(run) {
+      K.renameDialog({
+        name: run.name, run, names: (runsCache || []).map((r) => r.name),
+        onRenamed: async (to) => {
+          if (hist.selected.delete(run.name)) hist.selected.add(to);
+          await loadRuns(true);
+        },
+      });
     }
 
     async function stopRun(run) {
@@ -1706,6 +1963,9 @@ window.LabKit = (function () {
         return;
       } else if (demo === "delete") {
         if (finished[0]) deleteRun(finished[0]);
+        return;
+      } else if (demo === "rename") {
+        if (finished[0]) renameRun(finished[0]);
         return;
       } else if (demo === "stop") {
         const running = (runsCache || []).find((r) => r.status === "running");

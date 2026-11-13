@@ -1,14 +1,20 @@
 /* Run page: #/run/<name>[?tab=report|settings|log|checkpoints].
  *
- * One training run: header with actions, a row of stat tiles, then tabs. Progress is live while
- * the run is running (metrics are fetched with ?since= every 5 s and appended); Report is the
- * server's analysis with a clickable event timeline; Settings, Log and Checkpoints are what they
- * say. Not in the sidebar: the Training page links here.
+ * One training run: header with actions (Rename among them) and its verdict, a row of stat
+ * tiles, then tabs. Progress opens with a verdict banner (the report's headline, and a warning
+ * with a way to the tuning guide when the run fell behind or got worse), then the strength chart
+ * and three groups of small charts: "Is it learning?", "Training" and "Self-play games", each
+ * with a line on how to read it. It is live while the run is running (metrics are fetched with
+ * ?since= every 5 s and appended); Report is the server's analysis with a clickable event
+ * timeline; Settings, Log and Checkpoints are what they say. Not in the sidebar: the Training
+ * page links here. Fields an older server does not send (health, the seen error, guard records)
+ * are simply left out.
  */
 (function () {
   "use strict";
 
   const { h, fmt } = App;
+  const K = window.LabKit;
 
   const STATUS = {
     running: ["Running", "good"], stopping: ["Stopping", "warning"], queued: ["Queued", "info"],
@@ -77,6 +83,7 @@
       tabs: h("div", { class: "tabs", role: "tablist", "aria-label": "Run sections" }),
       panel: h("div", { class: "run-panel", role: "tabpanel" }),
     };
+    state.els = els;
     container.appendChild(h("div", { class: "run-page" }, els.head, els.notices, els.tiles, els.tabs, els.panel));
 
     App.every(5000, () => poll(state, els));
@@ -120,6 +127,7 @@
     if (state.tab === "progress") {
       if (fresh) updateProgress(state);
       updateLiveNote(state);
+      if (verdictStale(state)) loadVerdict(state);
     } else if (state.tab === "report" && isLive(detail.run) && Date.now() - state.reportAt > 15000) {
       refreshReport(state, els);
     } else if (state.tab === "checkpoints" && fresh) {
@@ -169,20 +177,26 @@
     const X = X_MODES[mode];
     const out = {
       gl: [], glBand: [], g: [], gBand: [], markers: [], sp: {}, tr: {}, gap: [], evalCount: 0, spCount: 0,
+      gate: [], gateBand: [], gateMarkers: [], winGl: [], winGlBand: [], winG: [], winGBand: [], scoreFor: [], scoreAgainst: [],
+      guardMarkers: [], seenCount: 0, lrCount: 0,
     };
     const spKeys = ["games_per_second", "temperature", "mean_score", "mean_turns", "bingos_per_game", "exchanges_per_game",
-      "passes_per_game", "win_brier", "replay_positions", "value_rmse_points", "leave_only_rmse_points"];
-    const trKeys = ["value_loss", "win_loss"];
+      "passes_per_game", "win_brier", "replay_positions", "value_rmse_points", "leave_only_rmse_points",
+      "first_player_win_rate", "mean_abs_spread"];
+    const trKeys = ["value_loss", "win_loss", "value_rmse_points", "learning_rate"];
     for (const k of spKeys) out.sp[k] = [];
     for (const k of trKeys) out.tr[k] = [];
+    const lines = () => [out.gl, out.g, out.gap, out.gate, out.winGl, out.winG, out.scoreFor, out.scoreAgainst,
+      ...Object.values(out.sp), ...Object.values(out.tr)];
+    const bands = () => [out.glBand, out.gBand, out.gateBand, out.winGlBand, out.winGBand];
+    const num = (v) => typeof v === "number" && Number.isFinite(v);
     let started = false;
     for (const r of records) {
       const x = X.of(r);
       if (r.kind === "session") {
         if (r.event === "start" && started) {
-          for (const list of [out.gl, out.g, out.gap, ...Object.values(out.sp), ...Object.values(out.tr)]) list.push([x, null]);
-          out.glBand.push([x, null, null]);
-          out.gBand.push([x, null, null]);
+          for (const list of lines()) list.push([x, null]);
+          for (const list of bands()) list.push([x, null, null]);
           out.markers.push({ x, label: "Resumed", tone: "info", detail: `A new session started from the checkpoint at step ${fmt.int(r.step)}.` });
         }
         continue;
@@ -192,20 +206,51 @@
         const [spread, ci] = evalSpread(r);
         if (typeof spread !== "number") continue;
         const half = typeof ci === "number" ? ci : 0;
+        const win = num(r.win_rate) ? r.win_rate : null;
+        const winHalf = num(r.win_ci) ? r.win_ci : null;
         if (r.opponent === "greedy-leave") {
           out.gl.push([x, spread]);
           out.glBand.push([x, spread - half, spread + half]);
           out.evalCount++;
+          if (win !== null) {
+            out.winGl.push([x, win]);
+            if (winHalf !== null) out.winGlBand.push([x, win - winHalf, win + winHalf]);
+          }
+          if (num(r.score_for)) out.scoreFor.push([x, r.score_for]);
+          if (num(r.score_against)) out.scoreAgainst.push([x, r.score_against]);
         } else if (r.opponent === "greedy") {
           out.g.push([x, spread]);
           out.gBand.push([x, spread - half, spread + half]);
+          if (win !== null) {
+            out.winG.push([x, win]);
+            if (winHalf !== null) out.winGBand.push([x, win - winHalf, win + winHalf]);
+          }
         }
-      } else if (r.kind === "gate" && r.promoted) {
+      } else if (r.kind === "gate") {
         const first = r.pairs === 0 && typeof r.spread !== "number";
-        out.markers.push({ x, label: first ? "First network to beat" : "New best network", tone: "good",
-          detail: first ? `Step ${fmt.int(r.step)}, the first network evaluated, became the one later networks have to beat.`
-            : `Step ${fmt.int(r.step)} was promoted to best.pt` + (typeof r.spread === "number"
-              ? `, ${fmt.spread(r.spread, r.spread_ci)} against the previous best.` : ".") });
+        if (r.promoted) {
+          out.markers.push({ x, label: first ? "First network to beat" : "New best network", tone: "good", group: "New best network",
+            detail: first ? `Step ${fmt.int(r.step)}, the first network evaluated, became the one later networks have to beat.`
+              : `Step ${fmt.int(r.step)} was promoted to best.pt` + (typeof r.spread === "number"
+                ? `, ${fmt.spread(r.spread, r.spread_ci)} against the previous best.` : ".") });
+        }
+        // The first gate has no match (pairs 0): the first network becomes the best without one.
+        if (!first && r.pairs !== 0 && num(r.spread)) {
+          out.gate.push([x, r.spread]);
+          if (num(r.spread_ci)) out.gateBand.push([x, r.spread - r.spread_ci, r.spread + r.spread_ci]);
+          if (r.promoted) {
+            out.gateMarkers.push({ x, label: "New best network", tone: "good",
+              detail: `Step ${fmt.int(r.step)} won its gate, ${fmt.spread(r.spread, r.spread_ci)}, and became the best network.` });
+          }
+        }
+      } else if (r.kind === "guard") {
+        const scale = num(r.learning_rate_scale) ? r.learning_rate_scale : null;
+        const marker = { x, label: "Back to best", group: "Back to the best network", tone: "warning", emphasis: true,
+          detail: `The trainer went back to the best network` + (num(r.to_step) ? ` (step ${fmt.int(r.to_step)})` : "") +
+            (scale !== null ? ` and lowered the learning rate to ${lrText(scale)} times its setting` : "") +
+            (r.reason ? `: ${fmt.prose(r.reason)}.` : ".") };
+        out.markers.push(marker);
+        out.guardMarkers.push(marker);
       } else if (r.kind === "selfplay") {
         out.spCount++;
         for (const k of spKeys) if (typeof r[k] === "number") out.sp[k].push([x, r[k]]);
@@ -215,9 +260,24 @@
       } else if (r.kind === "train") {
         if (mode === "games" && !r.games) continue;
         for (const k of trKeys) if (typeof r[k] === "number") out.tr[k].push([x, r[k]]);
+        if (num(r.value_rmse_points)) out.seenCount++;
+        if (num(r.learning_rate)) out.lrCount++;
       }
     }
     return out;
+  }
+
+  /** A share as a tick: "50%", "52.5%" (never a rounded "53%" beside an exact "55%"). */
+  function pctTick(v) {
+    const p = 100 * v;
+    return (Math.abs(p - Math.round(p)) < 1e-6 ? String(Math.round(p)) : p.toFixed(1)) + "%";
+  }
+
+  /** A learning rate (or a multiple of one) without float noise: 0.001, 0.0005, 0.00025. */
+  function lrText(v) {
+    if (typeof v !== "number" || !Number.isFinite(v)) return "–";
+    if (v === 0) return "0";
+    return String(Number(v.toPrecision(3)));
   }
 
   // ---- Header, notices, tiles -----------------------------------------------------------
@@ -238,6 +298,10 @@
   function renderHead(state, els) {
     const run = state.detail.run;
     const actions = h("div", { class: "page-actions" });
+    const blocked = K.renameBlocked(run);
+    actions.appendChild(h("span", { class: "tm-tip", title: blocked || `Rename ${run.name}, and with it its models` },
+      h("button", { class: "button button-ghost", type: "button", disabled: !!blocked, onclick: () => renameRun(state) },
+        K.icon("pencil", 14), "Rename")));
     if (run.status === "running") {
       actions.appendChild(h("button", { class: "button", type: "button", onclick: () => stopRun(state, els, false) }, icon(ICON.stop), "Stop"));
     } else if (run.status === "queued") {
@@ -258,7 +322,7 @@
     els.head.replaceChildren(h("div", { class: "page-head run-head" },
       h("div", null,
         h("a", { class: "dash-back", href: "#/training" }, icon(ICON.back), "Back to training"),
-        h("div", { class: "run-title" }, h("h1", null, run.name), badge(run)),
+        h("div", { class: "run-title" }, h("h1", null, run.name), badge(run), K.healthChip(run.health)),
         h("p", { class: "lede" }, `${run.network} network${params} · ` + (run.status === "queued"
           ? `queued ${fmt.datetime(run.created)}`
           : `started ${fmt.datetime(run.created)} · ` + (isLive(run) ? "live" : `last update ${fmt.ago(run.updated)}`)))),
@@ -436,39 +500,67 @@
       x: xShared, y: spreadY, markers: s.markers, height: 200, margin, legend: false,
       empty: s.gl.length ? "No evaluation against greedy." : "No evaluation yet.",
     };
-    opts.accuracy = {
-      title: "Value accuracy on unseen games",
-      subtitle: "Error of the predicted spread. Lower is better; the network should fall below the leave-only line.",
+    // Is it learning? The error on games it has trained on (seen) against new games (unseen):
+    // the seen line falling while the unseen one rises is memorising. Older runs have no seen line.
+    opts.seen = {
+      title: "Seen against unseen error",
       series: [
-        { name: "Network", points: sm(s.sp.value_rmse_points), color: "var(--series-1)" },
+        { name: "Unseen games", points: sm(s.sp.value_rmse_points), color: "var(--series-1)" },
+        s.seenCount ? { name: "Seen positions", points: sm(s.tr.value_rmse_points), color: "var(--series-2)" } : null,
         { name: "Leave values only", points: sm(s.sp.leave_only_rmse_points), color: "var(--text-muted)", dashed: true },
-      ],
-      x, y: { label: "RMSE, points", format: (v) => v.toFixed(2), tickFormat: "auto" }, height: 250, empty,
+      ].filter(Boolean),
+      x, y: { label: "RMSE of the predicted spread, points", format: (v) => v.toFixed(2), tickFormat: "auto" }, height: 250, empty,
     };
     opts.gap = {
       title: "Network's edge over leave values",
-      subtitle: "Leave-only error minus the network's, on the same games. Above zero, the network predicts better.",
       series: [{ name: "Edge", points: sm(s.gap), color: "var(--series-1)" }],
       x, y: { label: "points of RMSE", format: (v) => fmt.signed(v, 2), tickFormat: spreadTick }, referenceY: [{ y: 0, label: "no edge" }],
       height: 250, empty,
     };
-    opts.brier = {
-      title: "Win-probability accuracy",
-      subtitle: "Brier score of the win estimate on unseen games. Lower is better; 0.25 is a coin flip.",
-      series: [{ name: "Brier score", points: sm(s.sp.win_brier), color: "var(--series-1)" }],
-      x, y: { label: "Brier score", format: (v) => v.toFixed(4), tickFormat: "auto" }, height: 250, empty,
+    const evalEmpty = s.evalCount ? "Not recorded for this run." : strengthEmpty(state);
+    opts.gate = {
+      title: "Against the best so far",
+      series: [{ name: "Against the best", points: s.gate, band: s.gateBand, color: "var(--series-1)" }],
+      x, y: { label: "points per game", format: (v) => fmt.signed(v), tickFormat: spreadTick },
+      referenceY: [{ y: 0, label: "level with the best" }], markers: s.gateMarkers, height: small,
+      empty: s.evalCount ? "No gate match yet: the first network evaluated becomes the best without one." : strengthEmpty(state),
     };
-    const smallChart = (title, points, ylabel, format) => ({
+    opts.winRate = {
+      title: "Win rate against the bots",
+      series: [
+        { name: "Greedy + leave", points: s.winGl, band: s.winGlBand, color: "var(--series-1)" },
+        { name: "Greedy", points: s.winG, band: s.winGBand, color: "var(--series-2)" },
+      ],
+      x, y: { label: "games won", format: (v) => fmt.pct(v, 1), tickFormat: pctTick },
+      referenceY: [{ y: 0.5, label: "50%" }], height: small, empty: evalEmpty,
+    };
+    opts.scores = {
+      title: "Scores in evaluation",
+      series: [
+        { name: "Network", points: s.scoreFor, color: "var(--series-1)" },
+        { name: "Greedy + leave", points: s.scoreAgainst, color: "var(--series-2)" },
+      ],
+      x, y: { label: "points per game", format: (v) => v.toFixed(1), tickFormat: "auto" }, height: small, empty: evalEmpty,
+    };
+    const smallChart = (title, points, ylabel, format, extra) => Object.assign({
       title, series: [{ name: title, points, color: "var(--series-1)" }], x, y: { label: ylabel, format, tickFormat: "auto" },
       height: small, empty,
-    });
+    }, extra || {});
+    opts.brier = smallChart("Win-probability accuracy", sm(s.sp.win_brier), "Brier score", (v) => v.toFixed(4));
     opts.valueLoss = smallChart("Value loss", sm(s.tr.value_loss), "Huber loss", (v) => v.toFixed(4));
     opts.winLoss = smallChart("Win loss", sm(s.tr.win_loss), "cross-entropy", (v) => v.toFixed(4));
+    opts.lr = smallChart("Learning rate", s.tr.learning_rate, "step size", lrText,
+      { y: { label: "step size", format: lrText, tickFormat: lrText }, markers: s.guardMarkers,
+        empty: s.spCount ? "Not recorded for this run." : empty });
+    opts.replay = smallChart("Replay buffer", s.sp.replay_positions, "positions", (v) => fmt.compact(v));
     opts.throughput = smallChart("Self-play throughput", sm(s.sp.games_per_second), "games per second", (v) => v.toFixed(1));
     opts.temperature = smallChart("Exploration temperature", s.sp.temperature, "points", (v) => v.toFixed(2));
     opts.score = smallChart("Mean game score", sm(s.sp.mean_score), "points per player", (v) => v.toFixed(1));
+    opts.margin = smallChart("Margin of victory", sm(s.sp.mean_abs_spread), "points", (v) => v.toFixed(1));
+    opts.firstWin = smallChart("Who wins in self-play", sm(s.sp.first_player_win_rate), "games won by the first player",
+      (v) => fmt.pct(v, 1), { y: { label: "won by the first player", format: (v) => fmt.pct(v, 1), tickFormat: pctTick },
+        referenceY: [{ y: 0.5, label: "50%" }] });
     opts.turns = smallChart("Game length", sm(s.sp.mean_turns), "turns per game", (v) => v.toFixed(1));
-    opts.replay = smallChart("Replay buffer", s.sp.replay_positions, "positions", (v) => fmt.compact(v));
     opts.events = {
       title: "Bingos, exchanges, passes",
       series: [
@@ -479,6 +571,32 @@
       x, y: { label: "per game", format: (v) => v.toFixed(2), tickFormat: "auto" }, height: small, empty,
     };
     return { opts, s };
+  }
+
+  /** One line under each chart on how to read it. `seen` depends on whether the run recorded
+   *  its error on the positions it trains on (runs made from 13 November 2026 do). */
+  function captions(s) {
+    return {
+      seen: s.seenCount
+        ? "When the seen line falls while the unseen line rises, the network is memorising its games. The unseen line should end below the leave-only line."
+        : "The unseen line should end below the leave-only line. This run did not record its error on positions it has trained on, so there is no seen line.",
+      gap: "Leave-only error minus the network's, on the same new games. Above zero, the network predicts games better than leave values alone.",
+      gate: "Each new network head to head against the best so far. A flag marks a promotion: its band cleared zero and it became the best.",
+      winRate: "Share of evaluation games won against each bot, with the 95% interval. Above 50%, it wins more often than it loses.",
+      scores: "Average points a game against greedy + leave, the network's and the bot's. The gap between the lines is the spread.",
+      brier: "Error of the win estimate on new games. Lower is better; 0.25 is no better than a coin flip.",
+      valueLoss: "Error of the value output on the batches it trains on. It should drift down; jumps mean unstable training.",
+      winLoss: "Error of the win-probability output on the batches it trains on. It should drift down slowly.",
+      lr: "Size of each training step. It stays at its setting unless the trainer goes back to its best network, which lowers it (a flag marks each time).",
+      replay: "Positions kept to train on. It fills to the replay capacity, then new games push out the oldest.",
+      throughput: "Self-play games finished per second. Dips mean something else was using the GPU.",
+      temperature: "How random self-play moves are. It falls from the start value to the end value over the decay.",
+      score: "Average points per player in a self-play game. It rises as play improves and exploration falls.",
+      margin: "Average points between the winner and the loser of a self-play game.",
+      firstWin: "How often the player who moves first wins a self-play game. Moving first is worth a little, so slightly above 50% is normal.",
+      events: "Bingos, exchanges and passes per self-play game.",
+      turns: "Moves per self-play game.",
+    };
   }
 
   function strengthCaption(state, s) {
@@ -512,6 +630,10 @@
     if (!state.smoothing) state.smoothing = "light";
     const live = h("span", { class: "dash-live" });
     state.liveNote = live;
+    state.verdictEl = h("section", { class: "card vb", "aria-label": "Verdict" });
+    panel.appendChild(state.verdictEl);
+    renderVerdict(state);
+    if (verdictStale(state)) loadVerdict(state);
     panel.appendChild(h("div", { class: "run-toolbar" },
       h("div", { class: "row run-controls" },
         segmented("Plot against", [["games", "Games"], ["hours", "Hours"], ["steps", "Steps"]], state.xmode,
@@ -522,6 +644,7 @@
     updateLiveNote(state);
 
     const { opts, s } = progressOptions(state);
+    state.hadSeen = !!s.seenCount;
     const caption = h("p", { class: "dash-caption" }, strengthCaption(state, s));
     state.caption = caption;
     const slot = () => h("div");
@@ -534,16 +657,28 @@
           "Evaluations are not smoothed.")),
       slots.strength, h("div", { class: "run-strength-second" }, slots.strengthGreedy), caption));
 
+    state.captions = {};
     if (!s.spCount && !s.evalCount) {
       panel.appendChild(h("p", { class: "empty" }, h("strong", null, "The other charts appear once self-play starts."),
         "Value accuracy, loss, throughput and the self-play statistics are logged about once a minute."));
     } else {
-      panel.appendChild(h("div", { class: "grid-3 run-grid" },
-        h("div", { class: "card" }, slots.accuracy), h("div", { class: "card" }, slots.gap), h("div", { class: "card" }, slots.brier)));
-      panel.appendChild(h("h2", { class: "run-section-title" }, "Training and self-play"));
-      panel.appendChild(h("div", { class: "grid-4 run-grid" },
-        ["valueLoss", "winLoss", "throughput", "temperature", "score", "events", "turns", "replay"]
-          .map((key) => h("div", { class: "card run-small-card" }, slots[key]))));
+      const caps = captions(s);
+      const card = (key, small) => {
+        const cap = h("p", { class: "run-cap" }, caps[key]);
+        state.captions[key] = cap;
+        return h("div", { class: "card" + (small ? " run-small-card" : " run-mid-card") }, slots[key], cap);
+      };
+      const group = (title, sub, ...grids) => h("section", { class: "run-group" },
+        h("div", { class: "run-group-head" }, h("h2", null, title), h("p", null, sub)), ...grids);
+      panel.appendChild(group("Is it learning?",
+        "Whether the network predicts new games better than leave values alone, and whether each new network beats the last.",
+        h("div", { class: "grid-2 run-grid" }, card("seen"), card("gap")),
+        h("div", { class: "grid-4 run-grid" }, ["gate", "winRate", "scores", "brier"].map((key) => card(key, true)))));
+      panel.appendChild(group("Training", "The optimiser's side: the losses on the batches it trains on, its step size, and what it trains on.",
+        h("div", { class: "grid-4 run-grid" }, ["valueLoss", "winLoss", "lr", "replay"].map((key) => card(key, true)))));
+      panel.appendChild(group("Self-play games", "The games the network plays against itself to learn from.",
+        h("div", { class: "grid-4 run-grid" },
+          ["throughput", "temperature", "score", "margin", "firstWin", "events", "turns"].map((key) => card(key, true)))));
     }
     for (const [key, options] of Object.entries(opts)) {
       if (slots[key].isConnected) state.charts[key] = Charts.line(slots[key], options);
@@ -554,8 +689,9 @@
     if (!state.charts.strength) return;
     const { opts, s } = progressOptions(state);
     const hadSmall = !!state.charts.valueLoss;
-    if (!hadSmall && (s.spCount || s.evalCount)) {
-      // Self-play has just started: lay the tab out again to add the other charts.
+    const seenChanged = state.captions && state.captions.seen && !!s.seenCount !== state.hadSeen;
+    if ((!hadSmall && (s.spCount || s.evalCount)) || seenChanged) {
+      // Self-play has just started (or the first seen-error record arrived): lay the tab out again.
       const panel = state.charts.strength.element.closest(".run-panel");
       if (panel) {
         renderPanel(state, { panel });
@@ -564,6 +700,70 @@
     }
     for (const [key, chart] of Object.entries(state.charts)) if (opts[key]) chart.update(opts[key]);
     if (state.caption) state.caption.textContent = strengthCaption(state, s);
+  }
+
+  // ---- Verdict banner: how the run went, at the top of Progress ----------------------------
+
+  const guideHref = (name) => `#/guide?from=${enc("run/" + name)}`;
+
+  /** The report is read again when the run's status changes, and every 30 s while it trains. */
+  function verdictStale(state) {
+    const run = state.detail && state.detail.run;
+    if (!run) return false;
+    return !state.report || state.reportStatus !== run.status || (isLive(run) && Date.now() - state.reportAt > 30000);
+  }
+
+  async function loadVerdict(state) {
+    if (state.verdictBusy) return;
+    state.verdictBusy = true;
+    const status = state.detail.run.status;
+    try {
+      const report = await App.get(`/api/runs/${enc(state.name)}/report`);
+      state.report = report;
+      state.reportAt = Date.now();
+      state.reportStatus = status;
+    } catch (error) {
+      console.warn(error);
+      if (!state.report) state.reportFailed = true;
+    } finally {
+      state.verdictBusy = false;
+    }
+    renderVerdict(state);
+  }
+
+  /** The health object: the report's when it has one, else the run summary's (both may lack it). */
+  function healthOf(state) {
+    const sum = state.report && state.report.summary;
+    if (sum && sum.health !== undefined) return sum.health;
+    return state.detail && state.detail.run ? state.detail.run.health : undefined;
+  }
+
+  function renderVerdict(state) {
+    const el = state.verdictEl;
+    if (!el || !el.isConnected) return;
+    const report = state.report;
+    if (!report) {
+      el.hidden = !!state.reportFailed;
+      el.replaceChildren(h("p", { class: "muted vb-loading" }, "Reading the run…"));
+      return;
+    }
+    el.hidden = false;
+    const health = healthOf(state);
+    const bad = health && (health.state === "worse" || health.state === "behind");
+    el.classList.toggle("vb-bad", !!bad);
+    App.append(App.clear(el), [
+      h("div", { class: "vb-top" },
+        h("div", { class: "vb-main" },
+          h("div", { class: "vb-label" }, "How it went", K.healthChip(health)),
+          h("p", { class: "vb-headline" }, fmt.prose(report.headline))),
+        h("div", { class: "vb-actions" },
+          h("button", { type: "button", class: "button button-small", onclick: () => selectTab(state, state.els, "report") },
+            "Read the report"),
+          h("a", { class: "button button-small", href: guideHref(state.name) }, K.icon("book", 14), "Tuning guide"))),
+      bad ? h("div", { class: "notice notice-warning vb-notice", role: "note" }, icon(ICON.warning, "dash-notice-icon"),
+        h("div", { class: "dash-notice-main" },
+          fmt.prose(health.note), " ",
+          h("a", { href: guideHref(state.name) }, "See what each setting does, and which way to turn it, in the tuning guide."))) : null]);
   }
 
   function updateLiveNote(state) {
@@ -591,6 +791,7 @@
     if (state.tab !== "report" || !panel.isConnected) return;
     state.report = report;
     state.reportAt = Date.now();
+    state.reportStatus = state.detail.run.status;
     panel.replaceChildren();
     drawReport(state, panel, report);
   }
@@ -601,6 +802,7 @@
       if (state.tab !== "report") return;
       state.report = report;
       state.reportAt = Date.now();
+      state.reportStatus = state.detail.run.status;
       const keep = state.selectedEvent;
       renderPanelWith(state, els, report, keep);
     } catch (error) {
@@ -614,13 +816,25 @@
     drawReport(state, panel, report, selected);
   }
 
+  /** The health sentence under the report's headline: a warning when the run fell behind or got
+   *  worse, a plain note otherwise. Nothing when the server sends no verdict. */
+  function healthNotice(state, health) {
+    if (!health || !health.note) return null;
+    const bad = health.state === "worse" || health.state === "behind";
+    return h("div", { class: "notice report-health" + (bad ? " notice-warning" : "") },
+      bad ? icon(ICON.warning, "dash-notice-icon") : icon(ICON.info, "dash-notice-icon dash-tone-info"),
+      h("div", { class: "dash-notice-main" }, K.healthChip(health, "report-health-chip"), " ", fmt.prose(health.note),
+        bad ? [" ", h("a", { href: guideHref(state.name) }, "What to change: the tuning guide.")] : null));
+  }
+
   function drawReport(state, panel, report, selected) {
     const sum = report.summary || {};
     const best = sum.best;
     const final = sum.final;
     const fs = sum.first_significant;
+    const health = healthNotice(state, sum.health !== undefined ? sum.health : state.detail.run.health);
     if (!sum.games && !(report.events || []).length) {
-      panel.append(h("p", { class: "report-headline" }, fmt.prose(report.headline)),
+      panel.append(h("p", { class: "report-headline" }, fmt.prose(report.headline)), ...(health ? [health] : []),
         h("div", { class: "card" }, h("p", { class: "empty" }, h("strong", null, "Nothing to report yet."),
           "The report fills in as the run trains: its evaluations, new best networks and anything unusual along the way.")));
       return;
@@ -645,6 +859,7 @@
     const events = report.events || [];
     panel.append(
       h("p", { class: "report-headline" }, fmt.prose(report.headline)),
+      ...(health ? [health] : []),
       h("div", { class: "grid-4 report-tiles" }, tiles),
       h("div", { class: "split report-split" },
         h("div", { class: "card report-chart" }, chartSlot,
@@ -823,6 +1038,18 @@
     } catch (error) {
       App.toast(String(error.message || error), "critical");
     }
+  }
+
+  /** Rename the run, then show the same tab under its new name. */
+  function renameRun(state) {
+    const run = state.detail.run;
+    K.renameDialog({
+      name: run.name, run,
+      onRenamed: (to) => {
+        state.missing = true;  // the old name is gone: stop asking for it
+        App.go(`#/run/${enc(to)}` + (state.tab === "progress" ? "" : `?tab=${state.tab}`));
+      },
+    });
   }
 
   async function deleteRun(state) {

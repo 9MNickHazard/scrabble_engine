@@ -117,16 +117,16 @@
             help: "Exploration in those games, so the network also sees poor moves." })),
           field("warmstart.max_candidates", "Candidate moves", "int", 16, INT(2, 512, {
             help: "Moves per decision the static evaluator samples from during the warm start." })),
-          field("warmstart.steps", "Pretraining steps", "int", 3000, INT(0, 1000000, { unit: "steps",
+          field("warmstart.steps", "Pretraining steps", "int", 2000, INT(0, 1000000, { unit: "steps",
             help: "Training steps on the warm-start games before self-play begins." })),
         ],
       },
       {
         name: "train", title: "Training",
         fields: [
-          field("train.batch_size", "Batch size", "int", 2048, INT(1, 65536, { unit: "positions",
+          field("train.batch_size", "Batch size", "int", 1024, INT(1, 65536, { unit: "positions",
             help: "Positions per training step." })),
-          field("train.learning_rate", "Learning rate", "float", 0.001, FLOAT(0.00001, 0.1, 0.00001, {
+          field("train.learning_rate", "Learning rate", "float", 0.0003, FLOAT(0.00001, 0.1, 0.00001, {
             help: "Step size. Lower it (0.0003) if the loss jumps around or goes up; this is the first thing to try when a run is unstable." })),
           field("train.warmup_steps", "Warm-up steps", "int", 500, INT(0, 100000, { unit: "steps",
             help: "The learning rate rises linearly from zero over this many steps." })),
@@ -140,15 +140,15 @@
             help: "The value loss is quadratic within this many units (100 points at the default scale) and linear beyond." })),
           field("train.win_loss_weight", "Win loss weight", "float", 0.5, FLOAT(0, 10, 0.1, {
             help: "Weight of the win-probability loss relative to the value loss." })),
-          field("train.td_lambda", "TD lambda", "float", 1.0, FLOAT(0, 1, 0.05, {
+          field("train.td_lambda", "TD lambda", "float", 0.7, FLOAT(0, 1, 0.05, {
             help: "1 trains on the spread actually gained from each position on. Below 1, targets lean on the network's own estimate of the next position: less noise, more bias. Try 0.8 to 0.9 once a first run works." })),
           field("train.replay_capacity", "Replay capacity", "int", 3000000, INT(10000, 100000000, { unit: "positions",
             help: "Positions kept in RAM, about 310 bytes each: 3,000,000 is 0.9 GB and 10,000,000 about 3 GB. Raise it to train on a longer history." })),
           field("train.min_replay", "Minimum replay", "int", 100000, INT(1, 100000000, { unit: "positions",
             help: "Positions needed before training starts. At least the batch size and at most the replay capacity." })),
-          field("train.replay_ratio", "Replay ratio", "float", 4.0, FLOAT(0.1, 64, 0.5, {
+          field("train.replay_ratio", "Replay ratio", "float", 1.0, FLOAT(0.1, 64, 0.5, {
             help: "Training samples drawn per new self-play position. Higher learns more from each game, slows self-play and risks overfitting old data." })),
-          field("train.actor_sync_steps", "Weight sync interval", "int", 250, INT(1, 100000, { unit: "steps",
+          field("train.actor_sync_steps", "Weight sync interval", "int", 100, INT(1, 100000, { unit: "steps",
             help: "Training steps between copies of the weights into the self-play network." })),
           field("train.augment_transpose", "Transpose augmentation", "bool", true, {
             help: "Randomly swap rows and columns: the one exact symmetry of the board." }),
@@ -164,6 +164,10 @@
             help: "Pairs when testing a checkpoint against the best network so far. best.pt is replaced only when the new network wins with an interval that excludes zero." })),
           field("train.keep_checkpoints", "Checkpoints kept", "int", 5, INT(1, 100, {
             help: "step_*.pt files kept, about 20 MB each. best.pt is always kept." })),
+          field("train.guard", "Guard", "bool", true, {
+            help: "When a network is significantly behind the best one for several evaluations in a row, go back to the best network's weights and halve the learning rate." }),
+          field("train.guard_patience", "Guard patience", "int", 2, INT(1, 20, { unit: "evaluations",
+            help: "Evaluations in a row significantly behind the best before the guard acts." })),
         ],
       },
     ],
@@ -185,6 +189,122 @@
       { network: "20x256", parameters: 24486868, games_per_second: 3.4, measured: false, vram_gb: 7.6 },
     ],
   };
+
+  // What turning each setting down or up does, and the range worth trying (`effects` in
+  // docs/APP_API.md). For an on/off setting `lower` is off and `higher` on; for a choice, `lower`
+  // describes the first option and `higher` the second. The real text comes from the server.
+  const EFFECTS = {
+    "run.lexicon": ["", "", "Leave empty for the default word list. It cannot change once the run has started."],
+    "run.leaves": ["", "", "Leave empty for the fitted leave values of the word list."],
+    "run.seed": ["No effect on strength: a different seed gives different games, not better ones.",
+      "No effect on strength either. Change it to repeat an experiment on fresh games.",
+      "Any whole number. Keep it fixed when comparing runs that differ in one setting."],
+    "run.hours": ["A shorter run: fewer games, and the network may stop before it has learned anything.",
+      "More games and usually a stronger network, until it levels off. The GPU is busy for longer.",
+      "0.5 hours for a quick check, 6 to 10 overnight."],
+    "run.max_games": ["Stops sooner, after fewer self-play games.",
+      "Lets the run play more games before it stops. 0 means no game limit.",
+      "0 (let the time limit decide), or 400,000 to 2,000,000 games."],
+    "run.device": ["Trains on the GPU, about fifty times faster.", "Runs without a GPU: far too slow for real training.", "cuda."],
+    "run.vram_fraction": ["Leaves more GPU memory to other programs; an oversized setting fails sooner with an out-of-memory error.",
+      "Lets the run use more of the GPU. Near 1, Windows may spill into system RAM and crawl instead of failing.",
+      "0.8 to 0.9."],
+    "model.blocks": ["A shallower, faster network: more games an hour, less it can learn.",
+      "A deeper network that can learn more, but slower, and it needs many more games before it pays off.",
+      "6 for a first run; 10 to 12 for long runs."],
+    "model.channels": ["A narrower, faster network with less capacity.",
+      "A wider network: more capacity, slower self-play, more GPU memory.",
+      "64 to 128, a multiple of 8."],
+    "model.norm": ["No normalization: the fastest, each block starting as the identity.",
+      "GroupNorm: steadier for deep networks, about half the speed and 2.7 times the memory.",
+      "none."],
+    "model.vector_hidden": ["Less capacity for the leave, the unseen tiles and the scores; slightly faster.",
+      "More capacity for those inputs, at little cost in speed.", "64 to 256."],
+    "model.head_hidden": ["A smaller last layer: slightly faster, less room to combine what the network sees.",
+      "A larger last layer: more capacity, and more room to memorise games.", "128 to 512."],
+    "model.value_channels": ["The head sees less of where things are on the board.",
+      "The head keeps more detail per square; a little slower.", "4 to 16."],
+    "model.cross_checks": ["The network cannot see which letters fit where, and plays much worse.",
+      "The network sees the dictionary through the cross-checks. Keep it on.", "On."],
+    "model.leave_baseline": ["The network learns the whole value from scratch and starts far below the greedy + leave bot.",
+      "The network learns a correction to the leave values, so it starts level with greedy + leave.", "On."],
+    "selfplay.games": ["Fewer games at a time: smaller GPU batches, fewer games a second.",
+      "More games at a time: more games a second up to about 512, more memory.", "256 to 512."],
+    "selfplay.max_candidates": ["Faster games, but the network can only choose among the moves the static evaluator likes.",
+      "The network can find moves the static evaluator ranks low, at the cost of slower games.", "32 to 64."],
+    "selfplay.max_exchanges": ["Fewer exchanges considered: the network rarely learns when exchanging pays.",
+      "More exchange options per decision, taking candidate places from plays.", "2 to 8."],
+    "selfplay.temperature_start": ["Less exploration early: games stay close to the network's own choices and show it fewer alternatives.",
+      "More random early games: more variety, noisier targets.", "2 to 6 points."],
+    "selfplay.temperature_end": ["Late games follow the network's choices closely: sharper targets, less variety, more risk of memorising.",
+      "Keeps variety late in the run; games look more random.", "0.3 to 1 point."],
+    "selfplay.temperature_decay_games": ["The temperature reaches its end value sooner.", "Exploration lasts further into the run.",
+      "200,000 to 1,000,000 games."],
+    "selfplay.win_weight": ["Moves are chosen by expected spread, the right target while training.",
+      "Leans towards win probability: safer when ahead, riskier when behind.", "0 while training."],
+    "selfplay.win_scale": ["A certain win is worth fewer points in the blend, so spread dominates.",
+      "A certain win is worth more, so the blend leans further towards winning.",
+      "50 to 200 points; it matters only when the win weight is above 0."],
+    "warmstart.games": ["A shorter warm start: self-play begins sooner with less in the replay buffer.",
+      "A fuller replay buffer before the network plays, and a longer wait.", "50,000 to 200,000 games."],
+    "warmstart.temperature": ["Warm-start games closer to the static evaluator's best play.",
+      "More varied warm-start games, so the network also sees poor moves.", "4 to 8 points."],
+    "warmstart.max_candidates": ["The static evaluator samples from fewer moves: less variety.",
+      "More variety in warm-start play; slower games.", "8 to 32."],
+    "warmstart.steps": ["Self-play starts with a less trained network.",
+      "More pretraining on the warm-start games; too much and the network fits them too closely.", "1,000 to 5,000 steps."],
+    "train.batch_size": ["Noisier, cheaper steps, and more of them per game.",
+      "Smoother steps and more GPU memory; may want a higher learning rate.", "1,024 to 4,096 positions."],
+    "train.learning_rate": ["Steadier, slower learning. The first thing to try when the loss jumps or evaluations fall.",
+      "Faster learning, with more risk of instability and of the network getting worse.", "0.0003 to 0.001."],
+    "train.warmup_steps": ["Reaches the full learning rate sooner; a fresh network can lurch at the start.",
+      "A gentler start, a little slower to get going.", "200 to 2,000 steps."],
+    "train.weight_decay": ["Weights are free to grow: more risk of memorising the replay buffer.",
+      "A stronger pull towards small weights: less memorising, but too much limits what it can learn.", "0.00005 to 0.0005."],
+    "train.grad_clip": ["Clips more steps: steadier, slower learning. 0 turns clipping off entirely.",
+      "Clips only extreme steps, so large updates get through.", "0.5 to 2."],
+    "train.value_scale": ["Each unit of the value output is fewer points, so the loss sees spreads as larger.",
+      "Each unit is more points, so small spreads look smaller to the loss.", "50 points. Fixed for the life of a run."],
+    "train.huber_delta": ["Large errors count for less: robust to blowouts, slower to fit big spreads.",
+      "Closer to squared error: fits big spreads harder, more sensitive to freak games.", "1 to 4."],
+    "train.win_loss_weight": ["The win output trains less and the value output gets more of the network.",
+      "The win output matters more relative to the spread.", "0.25 to 1."],
+    "train.td_lambda": ["Targets lean on the network's own estimates: less noise, more bias.",
+      "Targets follow what really happened in the game: unbiased but noisy. 1 is the pure result.", "0.8 to 1."],
+    "train.replay_capacity": ["Trains on recent games only: adapts quickly, memorises sooner.",
+      "Trains on a longer history: less memorising, more RAM (about 310 bytes a position).", "2,000,000 to 10,000,000 positions."],
+    "train.min_replay": ["Training starts sooner, on fewer positions.", "Waits for more positions before the first step.",
+      "50,000 to 500,000 positions."],
+    "train.replay_ratio": ["Each position is trained on fewer times: less memorising, slower learning per game.",
+      "Learns more from each game, but slows self-play and risks memorising the buffer. Lower it if the error on unseen games rises.",
+      "2 to 8."],
+    "train.actor_sync_steps": ["Self-play uses the newest weights more often.", "Self-play lags further behind training; slightly faster.",
+      "100 to 1,000 steps."],
+    "train.augment_transpose": ["Half as much variety in the positions trained on.",
+      "Uses the board's one exact symmetry for free extra data. Keep it on.", "On."],
+    "train.amp": ["Full precision: about twice as slow.", "bf16 mixed precision: faster, with no loss of strength.", "On."],
+    "train.checkpoint_minutes": ["Saves more often, so a crash loses less.", "Saves less often; a crash or a force stop loses more training.",
+      "5 to 30 minutes."],
+    "train.eval_minutes": ["Evaluations more often: a finer strength curve, a little less training.",
+      "Fewer evaluations: more time training, a coarser picture.", "10 to 30 minutes."],
+    "train.eval_pairs": ["Faster evaluations with wider intervals.", "Narrower intervals, so small gains can be told from noise.",
+      "250 to 1,000 pairs."],
+    "train.gate_pairs": ["Faster gates, but a new best network is kept on weaker evidence.",
+      "A new best network has to win a longer match to be kept.", "250 to 1,000 pairs."],
+    "train.keep_checkpoints": ["Fewer step files on disk.", "More older networks to compare against, about 20 MB each.", "3 to 10."],
+    // On/off and choice sentences may carry their own label, as the server's do; the page shows it once.
+    "train.guard": ["Off: nothing stops a run drifting far below its best (best.pt is still kept).",
+      "On: a run can waste time but cannot end far worse than it started.", "On."],
+    "train.guard_patience": ["1 reacts at once, and to the occasional unlucky evaluation too.", "Waits longer before going back.", "2 to 3."],
+  };
+  if (!search.has("old")) {
+    for (const section of SCHEMA.sections) {
+      for (const f of section.fields) {
+        const [lower, higher, typical] = EFFECTS[f.key] || ["", "", ""];
+        f.effects = { lower, higher, typical };
+      }
+    }
+  }
 
   const FIELDS = {};
   for (const section of SCHEMA.sections) for (const f of section.fields) FIELDS[f.key] = f;
@@ -347,6 +467,24 @@
     });
   }
 
+  if (!M.has("POST", "/api/runs/x/rename")) {
+    M.on("POST", /^\/api\/runs\/([^/]+)\/rename$/, (match, body) => {
+      const name = decodeURIComponent(match[1]);
+      const run = findRun(name);
+      if (!run) return fail("no run named " + name);
+      const to = String((body && body.name) || "").trim();
+      if (["running", "stopping", "queued"].includes(run.summary.status)) return fail(`${name} is ${run.summary.status}; it cannot be renamed now`);
+      if (!/^[A-Za-z0-9_-]+$/.test(to)) return fail(`invalid run name '${to}': use letters, digits, - and _`);
+      if (to === name) return fail(`${name} already has that name`);
+      if (takenNames.has(to.toLowerCase()) && to.toLowerCase() !== name.toLowerCase()) return fail(`a run named '${to}' already exists`);
+      takenNames.delete(name.toLowerCase());
+      takenNames.add(to.toLowerCase());
+      run.summary.name = to;
+      App.emit("mock:rename", { from: name, to });
+      return run.summary;
+    });
+  }
+
   /** The checks of Config.validate() that a form can trip, in the server's words. */
   function validateConfig(values) {
     const v = (key) => values[key];
@@ -442,7 +580,21 @@
     model("night3", "step_000025900.pt", "6x64", 25900, 583000, 0.3, [4.0, 7.7], [39.8, 9.0]),
     model("dryrun", "best.pt", "6x64", 1100, 21000, 50, [-1.8, 7.9], [28.5, 9.4],
       { incompatible_reason: "Trained with leave values that have since been refitted, so its values no longer mean the same thing." }),
+    // wide2 got worse as it trained (js/mock/training.js): its best is the first network evaluated.
+    model("wide2", "best.pt", "10x128", 4100, 23300, 3.1, [-7.8, 7.0], [33.1, 8.2]),
+    model("wide2", "step_000024100.pt", "10x128", 24100, 460800, 3, [-71.3, 8.4], [-30.2, 8.6]),
   ].map((m) => (m.incompatible_reason ? Object.assign(m, { compatible: false }) : m));
+
+  // A run renamed in js/mock/training.js renames its models (they are named after their run).
+  App.on("mock:rename", ({ from, to }) => {
+    for (const m of MODELS) {
+      if (m.run !== from) continue;
+      m.run = to;
+      m.id = `${to}/${m.file}`;
+      m.spec = `model:${m.id}`;
+      m.name = m.kind === "best" ? `${to} (best)` : `${to} (step ${m.step.toLocaleString("en-US")})`;
+    }
+  });
 
   function manyModels() {
     const rand = random(99);

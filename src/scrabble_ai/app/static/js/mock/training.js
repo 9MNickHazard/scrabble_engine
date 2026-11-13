@@ -7,7 +7,18 @@
  * pages visibly move.
  *
  * Mock-only flags in the page URL: &theme=light or &theme=dark forces the theme, &empty=1 starts
- * with no runs and no matches (the first-launch state).
+ * with no runs and no matches (the first-launch state), &idle=1 leaves out the running and the
+ * queued run (nothing is training: the Overview shows its "Latest run" panel), &old=1 drops the
+ * fields an older server does not send (trend, best_eval, health, the seen error, guards).
+ *
+ * The run summary carries `trend`, `best_eval` and `health`, and the report `summary.health`,
+ * as docs/APP_API.md describes. wide2 is a run that got worse as it trained (like a real 10x128
+ * run did): its evaluations fall from about -8 to -70, its error on unseen games rises above the
+ * leave-only line while the error on its training batches falls, and the trainer goes back to its
+ * best network once. night2 is an older run, without the seen error.
+ *
+ * POST /api/runs/<name>/rename renames a run here and tells js/mock/library.js (App.emit
+ * "mock:rename") so the models follow.
  *
  * GET /api/models belongs to js/mock/library.js; a small fallback here answers it only when no
  * other mock file does (see `fallback` below).
@@ -19,6 +30,8 @@
   const forcedTheme = params.get("theme");
   if (forcedTheme === "light" || forcedTheme === "dark") document.documentElement.dataset.theme = forcedTheme;
   const EMPTY = params.has("empty");
+  const IDLE = params.has("idle");
+  const OLD = params.has("old");
   const NOW = Date.now() / 1000;
   const HOUR = 3600;
 
@@ -64,11 +77,11 @@
     model: { blocks: 6, channels: 64, norm: "none", vector_hidden: 128, head_hidden: 256, value_channels: 8, cross_checks: true, leave_baseline: true },
     selfplay: { games: 256, max_candidates: 64, max_exchanges: 4, temperature_start: 4.0, temperature_end: 0.5,
       temperature_decay_games: 300000, win_weight: 0.0, win_scale: 100.0 },
-    warmstart: { games: 100000, temperature: 6.0, max_candidates: 16, steps: 3000 },
-    train: { batch_size: 2048, learning_rate: 0.001, warmup_steps: 500, weight_decay: 0.0001, grad_clip: 1.0, value_scale: 50.0,
-      huber_delta: 2.0, win_loss_weight: 0.5, td_lambda: 1.0, replay_capacity: 3000000, min_replay: 100000, replay_ratio: 4.0,
-      actor_sync_steps: 250, augment_transpose: true, amp: true, checkpoint_minutes: 10.0, eval_minutes: 20.0, eval_pairs: 250,
-      gate_pairs: 500, keep_checkpoints: 5 },
+    warmstart: { games: 100000, temperature: 6.0, max_candidates: 16, steps: 2000 },
+    train: { batch_size: 1024, learning_rate: 0.0003, warmup_steps: 500, weight_decay: 0.0001, grad_clip: 1.0, value_scale: 50.0,
+      huber_delta: 2.0, win_loss_weight: 0.5, td_lambda: 0.7, replay_capacity: 3000000, min_replay: 100000, replay_ratio: 1.0,
+      actor_sync_steps: 100, augment_transpose: true, amp: true, checkpoint_minutes: 10.0, eval_minutes: 20.0, eval_pairs: 250,
+      gate_pairs: 500, keep_checkpoints: 5, guard: true, guard_patience: 2 },
   };
   const PARAMETERS = { "6x64": 1055056, "10x128": 3655316, "8x96": 2093624, "20x256": 24318740 };
 
@@ -94,7 +107,7 @@
       r: rng(spec.seed), records: [], status: spec.status || "running", error: null,
       sim: { h: 0, games: 0, step: 0, positions: 0, replay: 0, phase: null, lastEval: 0, lastCkpt: 0, lastLog: 0,
         best: null, bestTrue: -99, evalIndex: 0, sessionStartH: 0, wallOffset: 0, checkpoints: [], snapshot: null,
-        maxGame: 640, maxPlay: 150 },
+        maxGame: 640, maxPlay: 150, lrScale: 1, worsenFrom: spec.worsenFrom || 0.55, worsen: spec.worsen || 0, guards: 0 },
       limitHours: spec.limitHours || 0, maxGames: 0, live: false,
     };
     runs.push(run);
@@ -167,22 +180,29 @@
     s.positions += positions;
     s.step += Math.round((positions * cfg.train.replay_ratio) / cfg.train.batch_size);
     s.replay = Math.min(cfg.train.replay_capacity, s.replay + positions);
-    const vl = 0.951 - 0.074 * q + 0.006 * gauss(r);
+    // A run that memorises its games: the error on unseen games climbs above the leave-only line
+    // while the error on the batches it trains on keeps falling.
+    const memo = run.spec.overfit ? run.spec.overfit * (1 - Math.exp(-Math.max(0, s.h - 0.4) / 1.2)) : 0;
+    const leaveOnly = 73.9 + 0.75 * gauss(r);
+    const unseen = leaveOnly - (run.spec.rmseGain || 2.1) * q + memo + 0.16 * gauss(r);
+    const seen = unseen - 0.5 - 0.6 * q - 1.7 * memo + 0.2 * gauss(r);
+    const vl = 0.951 - 0.074 * q - 0.012 * memo + 0.006 * gauss(r);
     const wl = 0.451 - 0.021 * q + 0.003 * gauss(r);
-    push(run, "train", { loss: round(vl + 0.5 * wl, 4), value_loss: round(vl, 4), win_loss: round(wl, 4),
-      value_error_points: round(53.9 - 3.1 * q + 0.25 * gauss(r), 3), learning_rate: cfg.train.learning_rate });
+    const trainRecord = { loss: round(vl + 0.5 * wl, 4), value_loss: round(vl, 4), win_loss: round(wl, 4),
+      value_error_points: round(53.9 - 3.1 * q - 1.2 * memo + 0.25 * gauss(r), 3), learning_rate: cfg.train.learning_rate * s.lrScale };
+    if (!run.spec.old && !OLD) trainRecord.value_rmse_points = round(seen, 3);
+    push(run, "train", trainRecord);
     const sp = cfg.selfplay;
     const temperature = sp.temperature_end + (sp.temperature_start - sp.temperature_end) *
       Math.max(0, 1 - s.games / sp.temperature_decay_games);
-    const leaveOnly = 73.9 + 0.75 * gauss(r);
     const maxGame = 560 + Math.round(90 * r() + 40 * q);
     const maxPlay = 120 + Math.round(70 * r() ** 3);
     push(run, "selfplay", {
       games_per_second: round(gps, 3), positions_per_second: round(positions / 60, 2),
       mean_score: round(415.2 + 12.5 * q + 3.2 * (1 - temperature / 4) + 1.1 * gauss(r), 2),
-      mean_turns: round(24.72 - 0.7 * q + 0.12 * gauss(r), 3), mean_abs_spread: round(86 - 4.2 * q + 0.9 * gauss(r), 2),
+      mean_turns: round(24.72 - 0.7 * q + 0.12 * gauss(r), 3), mean_abs_spread: round(86 - 4.2 * q + 0.35 * memo + 0.9 * gauss(r), 2),
       first_player_win_rate: round(0.546 + 0.009 * gauss(r), 4), temperature: round(temperature, 4),
-      value_rmse_points: round(leaveOnly - (run.spec.rmseGain || 2.1) * q + 0.16 * gauss(r), 3), leave_only_rmse_points: round(leaveOnly, 3),
+      value_rmse_points: round(unseen, 3), leave_only_rmse_points: round(leaveOnly, 3),
       win_brier: round(0.1525 - 0.0125 * q + 0.0016 * gauss(r), 5), replay_positions: s.replay,
       replay_gb: round(s.replay * 310 / 1e9, 3), bingos_per_game: round(1.73 + 0.21 * q + 0.025 * gauss(r), 3),
       exchanges_per_game: round(0.46 - 0.15 * q + 0.012 * gauss(r), 3),
@@ -211,6 +231,8 @@
     const q = quality(run, s.h);
     let trueGl = run.spec.gl * q + (run.spec.gl0 || 0);
     if (run.spec.dipAt === s.evalIndex) trueGl -= 6.5;
+    // A run that gets worse as it trains (see wide2), from s.worsenFrom hours on.
+    if (s.worsen) trueGl -= s.worsen * (1 - Math.exp(-Math.max(0, s.h - s.worsenFrom) / 0.75));
     const ciGl = evalCi(run);
     const gl = trueGl + gauss(r) * (ciGl / 1.96) * 0.75;
     const trueG = 36 + 10.5 * q;
@@ -218,7 +240,8 @@
     const g = trueG + gauss(r) * (ciG / 1.96) * 0.75;
     const pairs = run.config.train.eval_pairs;
     const extra = (opponent, spread, ci, base) => ({
-      opponent, spread: round(spread, 2), spread_ci: round(ci, 3), win_rate: round(0.5 + spread / 118 + 0.008 * gauss(r), 4),
+      opponent, spread: round(spread, 2), spread_ci: round(ci, 3),
+      win_rate: round(Math.min(0.99, Math.max(0.01, 1 / (1 + Math.exp(-spread / 60)) + 0.008 * gauss(r))), 4),
       win_ci: round(0.98 / Math.sqrt(pairs) * 1.1, 4), score_for: round(base + spread / 2, 1), score_against: round(base - spread / 2, 1), pairs,
     });
     const glRecord = push(run, "eval", extra("greedy-leave", gl, ciGl, 428));
@@ -227,13 +250,26 @@
     const ciGate = 5.3 + 0.3 * gauss(r);
     const gain = trueGl - s.bestTrue;
     const promoted = s.best === null || (gain > 0.85 && run.spec.dipAt !== s.evalIndex);
-    const spread = s.best === null ? 9.5 + 3 * r() : promoted ? ciGate + 0.6 + 2.4 * r() : Math.min(ciGate - 0.4, gain + 2.2 * gauss(r));
-    push(run, "gate", { spread: round(spread, 2), spread_ci: round(ciGate, 3), win_rate: round(0.5 + spread / 120, 4),
-      best_step: s.best ? s.best.step : null, promoted, pairs: run.config.train.gate_pairs });
+    const spread = promoted ? ciGate + 0.6 + 2.4 * r() : Math.min(ciGate - 0.4, gain + 2.2 * gauss(r));
+    // The first evaluated network becomes the best without a match (pairs 0, no spread), as train.py logs it.
+    if (s.best === null) push(run, "gate", { spread: null, spread_ci: null, win_rate: null, best_step: s.step, promoted: true, pairs: 0 });
+    else {
+      push(run, "gate", { spread: round(spread, 2), spread_ci: round(ciGate, 3), win_rate: round(0.5 + spread / 120, 4),
+        best_step: s.best.step, promoted, pairs: run.config.train.gate_pairs });
+    }
     if (promoted) {
       s.best = { step: s.step, games: s.games, hours: s.h, spread: glRecord.spread, ci: glRecord.spread_ci,
         win_rate: glRecord.win_rate, greedy: { spread: round(g, 2), ci: round(ciG, 3), win_rate: round(0.5 + g / 118, 4) } };
       s.bestTrue = trueGl;
+    } else if (!OLD && s.guards < (run.spec.guard || 0) && s.best &&
+        s.best.spread - glRecord.spread > Math.hypot(s.best.ci, glRecord.spread_ci)) {
+      // The trainer's guard: back to the best network's weights, at half the learning rate.
+      s.guards++;
+      s.lrScale /= 2;
+      s.worsenFrom = s.h;
+      s.worsen *= 0.85;
+      push(run, "guard", { action: "rollback", to_step: s.best.step, learning_rate_scale: s.lrScale,
+        reason: `the evaluation against greedy-leave fell to ${signed(glRecord.spread)}, significantly below the best (${signed(s.best.spread)})` });
     }
   }
 
@@ -272,21 +308,32 @@
 
   function buildRuns() {
     if (EMPTY) return;
-    // A run that is training now: three hours into an eight-hour limit.
-    const night3 = newRun({ name: "night3", seed: 3303, created: NOW - 3.25 * HOUR, limitHours: 8, gps: 55.4, tau: 2.6, gl: 6.6, gl0: -0.4,
-      ciBase: 7.8, changed: { "run.hours": 8, "train.td_lambda": 0.9 } });
-    startSession(night3);
-    simulateTo(night3, 3.2);
-    night3.live = true;
+    if (!IDLE) {
+      // A run that is training now: three hours into an eight-hour limit.
+      const night3 = newRun({ name: "night3", seed: 3303, created: NOW - 3.25 * HOUR, limitHours: 8, gps: 55.4, tau: 2.6, gl: 6.6, gl0: -0.4,
+        ciBase: 7.8, changed: { "run.hours": 8, "train.td_lambda": 0.9 } });
+      startSession(night3);
+      simulateTo(night3, 3.2);
+      night3.live = true;
 
-    // Waiting for night3 to finish.
-    const night4 = newRun({ name: "night4", seed: 4404, created: NOW - 3.25 * HOUR + 2, limitHours: 8, gps: 18, tau: 2.6, gl: 7,
-      status: "queued", changed: { "run.hours": 8, "model.blocks": 10, "model.channels": 128 } });
-    void night4;
+      // Waiting for night3 to finish.
+      const night4 = newRun({ name: "night4", seed: 4404, created: NOW - 3.25 * HOUR + 2, limitHours: 8, gps: 18, tau: 2.6, gl: 7,
+        status: "queued", changed: { "run.hours": 8, "model.blocks": 10, "model.channels": 128 } });
+      void night4;
+    }
 
-    // Last night's run: eight hours, interrupted once and resumed with more evaluation pairs.
+    // A larger network that got worse as it trained: its best network is the first one evaluated.
+    const wide2 = newRun({ name: "wide2", seed: 6606, created: NOW - 10.2 * HOUR, limitHours: 7, gps: 18.3, tau: 3, gl: 1, gl0: -8,
+      ciBase: 7.9, worsen: 72, overfit: 7, guard: 1, rmseGain: 1.4,
+      changed: { "run.hours": 7, "model.blocks": 10, "model.channels": 128, "train.checkpoint_minutes": 120 } });
+    startSession(wide2);
+    simulateTo(wide2, 7);
+    finish(wide2, "time limit reached", "finished");
+
+    // Last night's run: eight hours, interrupted once and resumed with more evaluation pairs. An
+    // older run: it did not record the error on the positions it trained on.
     const night2 = newRun({ name: "night2", seed: 2202, created: NOW - 17 * HOUR, limitHours: 8, gps: 56.2, tau: 2.2, gl: 7.0, gl0: -0.6,
-      ciBase: 8.1, dipAt: 15, slowAt: 5.6, rmseGain: 2.0, changed: { "run.hours": 8 } });
+      ciBase: 8.1, dipAt: 15, slowAt: 5.6, rmseGain: 2.0, old: true, changed: { "run.hours": 8 } });
     startSession(night2);
     simulateTo(night2, 3.2);
     resumeFromSnapshot(night2, 1.45, { "run.hours": 5, "train.eval_pairs": 1000 });
@@ -310,7 +357,7 @@
 
     // The first five-minute dry run.
     const dryrun = newRun({ name: "dryrun", seed: 909, created: NOW - 50 * HOUR, limitHours: 0.1, gps: 58.4, tau: 2.2, gl: 7, gl0: 3.6,
-      changed: { "run.hours": 0.1, "warmstart.games": 20000, "train.eval_minutes": 2 } });
+      old: true, changed: { "run.hours": 0.1, "warmstart.games": 20000, "train.eval_minutes": 2 } });
     startSession(dryrun);
     simulateTo(dryrun, 0.105);
     finish(dryrun, "time limit reached", "finished");
@@ -360,6 +407,45 @@
     return evals[evals.length - 1] || null;
   }
 
+  /** The run's evaluations against greedy-leave, oldest first. */
+  function glEvals(run) {
+    return run.records.filter((r) => r.kind === "eval" && r.opponent === "greedy-leave" && typeof r.spread === "number");
+  }
+
+  /** The verdict on how training went, as docs/APP_API.md describes `health`. */
+  function healthOf(run) {
+    const evals = glEvals(run);
+    if (!evals.length) return null;
+    const latest = evals[evals.length - 1];
+    const best = evals.reduce((a, e) => (e.spread > a.spread ? e : a), evals[0]);
+    const recent = run.records.filter((r) => r.kind === "selfplay").slice(-10);
+    const edge = recent.length ? round(mean(recent.map((r) => r.leave_only_rmse_points - r.value_rmse_points)), 2) : null;
+    const now = `${signedPlain(latest.spread)} +/- ${latest.spread_ci.toFixed(1)}`;
+    let state;
+    let note;
+    if (best !== latest && best.spread - latest.spread > Math.hypot(best.spread_ci, latest.spread_ci)) {
+      state = "worse";
+      note = `It got worse as it trained: the latest evaluation, ${now} against greedy-leave, is well below its best, ` +
+        `${signedPlain(best.spread)} +/- ${best.spread_ci.toFixed(1)} at ${int(best.games)} games.` +
+        (best === evals[0] ? " Its best network is the first one evaluated." : "") +
+        (edge !== null && edge < 0 ? " It also predicts new games worse than leave values alone, a sign that it memorised its training games." : "");
+    } else if (latest.spread - latest.spread_ci > 0) {
+      state = "ahead";
+      note = `It beats greedy-leave: ${now} points a game at the latest evaluation, the whole interval above zero.`;
+    } else if (latest.spread + latest.spread_ci < 0) {
+      state = "behind";
+      note = `It plays worse than greedy-leave: ${now} points a game at the latest evaluation, the whole interval below zero.`;
+    } else {
+      state = "level";
+      note = `It is level with greedy-leave so far: ${now} points a game, an interval that includes zero.`;
+    }
+    return { state, edge, note };
+  }
+
+  function signedPlain(v) {
+    return (v >= 0 ? "+" : "-") + Math.abs(v).toFixed(1);
+  }
+
   function summary(run) {
     const s = run.sim;
     const last = run.records[run.records.length - 1];
@@ -367,7 +453,14 @@
     const gl = evalAt(run, "greedy-leave");
     const g = evalAt(run, "greedy");
     const sessionHours = s.h - s.sessionStartH;
-    return {
+    const evals = glEvals(run);
+    const best = evals.length ? evals.reduce((a, e) => (e.spread > a.spread ? e : a), evals[0]) : null;
+    const extra = OLD ? {} : {
+      trend: { games: evals.map((e) => e.games), spread: evals.map((e) => e.spread), ci: evals.map((e) => e.spread_ci) },
+      best_eval: best ? { games: best.games, step: best.step, spread: best.spread, ci: best.spread_ci } : null,
+      health: healthOf(run),
+    };
+    return Object.assign({
       name: run.spec.name,
       status: run.status,
       phase: s.phase,
@@ -392,7 +485,7 @@
       checkpoints: s.checkpoints.length,
       changed: Object.assign({}, run.spec.changed),
       error: run.error,
-    };
+    }, extra);
   }
 
   function checkpointList(run) {
@@ -433,9 +526,13 @@
       } else if (r.kind === "eval") {
         lines.push(t + `net@${r.step} vs ${r.opponent}: spread ${signed(r.spread)} +/- ${r.spread_ci.toFixed(1)}, ` +
           `win ${(100 * r.win_rate).toFixed(1)}% (${r.pairs} pairs)`);
+      } else if (r.kind === "gate" && r.pairs === 0) {
+        lines.push(t + `gate: net@${r.step} is the first network evaluated and becomes best.pt`);
       } else if (r.kind === "gate") {
-        lines.push(t + `gate: net@${r.step} vs best@${r.best_step === null ? "warm start" : r.best_step}: spread ${signed(r.spread)} +/- ` +
+        lines.push(t + `gate: net@${r.step} vs best@${r.best_step}: spread ${signed(r.spread)} +/- ` +
           `${r.spread_ci.toFixed(1)}, ${r.promoted ? "promoted to best.pt" : "kept best"}`);
+      } else if (r.kind === "guard") {
+        lines.push(t + `guard: back to best@${r.to_step}, learning rate x${r.learning_rate_scale}: ${r.reason}`);
       } else if (r.kind === "checkpoint") lines.push(t + `checkpoint ${r.file}`);
     }
     if (run.status === "failed" && run.error) {
@@ -475,9 +572,11 @@
         detail: `Pretraining finished after ${int(run.config.warmstart.steps)} steps.` });
     }
     for (const g of promoted) {
-      events.push({ games: g.games, hours: g.hours, kind: "promotion", tone: "good", title: "New best network",
-        detail: g.best_step === null ? `Step ${int(g.step)} became the first best network.`
-          : `Step ${int(g.step)} beat the previous best by ${spreadText(g.spread, g.spread_ci)} over ${g.pairs} pairs.` });
+      events.push(g.pairs === 0
+        ? { games: g.games, hours: g.hours, kind: "promotion", tone: "info", title: "First network to beat",
+          detail: "The first evaluated network became the best so far; later networks have to beat the current best head to head to replace it." }
+        : { games: g.games, hours: g.hours, kind: "promotion", tone: "good", title: "New best network",
+          detail: `Step ${int(g.step)} beat the previous best by ${spreadText(g.spread, g.spread_ci)} over ${g.pairs} pairs.` });
     }
     if (first) {
       events.push({ games: first.games, hours: first.hours, kind: "significant", tone: "good", title: "First significant win over greedy-leave",
@@ -488,6 +587,22 @@
       if (drop > 4.5) {
         events.push({ games: evals[i].games, hours: evals[i].hours, kind: "regression", tone: "warning", title: "Evaluation dropped",
           detail: `Fell ${drop.toFixed(1)} points from the previous evaluation.` });
+      }
+    }
+    if (!OLD) {
+      for (const r of recs) {
+        if (r.kind !== "guard") continue;
+        events.push({ games: r.games, hours: r.hours, kind: "guard", tone: "warning", title: "Went back to the best network",
+          detail: `Restored the weights of step ${int(r.to_step)} and lowered the learning rate to ${r.learning_rate_scale} of its setting: ${r.reason}.` });
+      }
+      // The first time the network predicts unseen games worse than leave values alone, over five reports.
+      for (let i = 4; i < sps.length; i++) {
+        const window = sps.slice(i - 4, i + 1);
+        if (mean(window.map((r) => r.value_rmse_points - r.leave_only_rmse_points)) > 0.3) {
+          events.push({ games: sps[i].games, hours: sps[i].hours, kind: "overfit", tone: "warning", title: "Began memorising its games",
+            detail: "Its error on new self-play games rose above the error of leave values alone, while its error on the positions it trains on kept falling." });
+          break;
+        }
       }
     }
     let record = 700;
@@ -537,20 +652,25 @@
         : `${name} ended before its first evaluation.`;
     } else if (best && best.spread - best.ci > 0) {
       headline = `${name} beat greedy-leave by ${best.spread.toFixed(1)} points a game at its best, and the gain is significant.`;
+    } else if (final.spread + final.spread_ci < 0) {
+      const top = evals.reduce((a, e) => (e.spread > a.spread ? e : a), evals[0]);
+      headline = `${name} is significantly worse than greedy-leave: ${signedPlain(final.spread)} +/- ${final.spread_ci.toFixed(1)} points a game ` +
+        `at its latest evaluation.` + (top !== final ? ` Its best was ${signedPlain(top.spread)} +/- ${top.spread_ci.toFixed(1)}.` : "");
     } else {
       headline = `${name} is at ${spreadText(final.spread, final.spread_ci)} against greedy-leave so far: not yet a significant difference.`;
     }
+    const health = OLD ? {} : { health: healthOf(run) };
     return {
       headline,
-      summary: {
+      summary: Object.assign(health, {
         games: s.games, hours: round(s.h, 3), steps: s.step,
         mean_games_per_second: sps.length ? round(mean(sps.map((r) => r.games_per_second)), 2) : null,
         best,
         final: final ? { step: final.step, games: final.games, spread: final.spread, ci: final.spread_ci, win_rate: final.win_rate } : null,
         first_significant: first ? { games: first.games, hours: first.hours } : null,
-        promotions: promoted.length,
+        promotions: promoted.filter((g) => g.pairs > 0).length,
         value_rmse_gain: rmseGain === null ? null : round(rmseGain, 2),
-      },
+      }),
       events,
     };
   }
@@ -949,6 +1069,29 @@
     if (run.status === "running" || run.status === "stopping") return { error: `Stop ${run.spec.name} before deleting it.` };
     runs.splice(runs.indexOf(run), 1);
     return { ok: true };
+  });
+
+  App.mock.on("POST", /^\/api\/runs\/([^/]+)\/rename$/, (match, body) => {
+    const run = findRun(match[1]);
+    if (!run) return noRun(match[1]);
+    const from = run.spec.name;
+    const to = String((body && body.name) || "").trim();
+    if (run.status === "running" || run.status === "stopping") return { error: `${from} is training; stop it before renaming it.` };
+    if (run.status === "queued") return { error: `${from} is queued; take it out of the queue before renaming it.` };
+    if (!/^[A-Za-z0-9_-]+$/.test(to)) return { error: `"${to}" is not a valid run name: use letters, digits, - and _.` };
+    if (to === from) return { error: `${from} is already called that.` };
+    if (runs.some((r) => r !== run && r.spec.name.toLowerCase() === to.toLowerCase())) return { error: `A run called ${to} already exists.` };
+    run.spec.name = to;
+    run.config.run.name = to;
+    const rename = (spec) => spec.replace(new RegExp(`^model:${from}/`), `model:${to}/`);
+    for (const m of matches) {
+      m.a = rename(m.a);
+      m.b = rename(m.b);
+      m.a_name = playerName(m.a);
+      m.b_name = playerName(m.b);
+    }
+    App.emit("mock:rename", { from, to });
+    return summary(run);
   });
 
   App.mock.on("GET", /^\/api\/matches$/, () => ({ matches: matches.map(matchSummary) }));

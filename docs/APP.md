@@ -71,6 +71,11 @@ What is training now (progress against its limit, games per second, its latest r
 the baseline with a small chart), what is queued, the GPU's load and memory, the strongest
 network of each run, and the most recent runs and matches.
 
+When nothing is training, the top panel is the **latest run**: its verdict in a sentence, its
+latest and best evaluations, how long it trained, its strength chart, and **Open all charts**.
+The line under the page title says where things stand overall, and it does not call a network
+better than the baseline until an evaluation's whole interval is above zero.
+
 ### Training
 
 **Start training.** Pick a starting point (Default 6x64, Larger 10x128, Wide 12x192, or a
@@ -82,9 +87,13 @@ keeps its default from [configs/train.toml](../configs/train.toml).
   many games the time limit buys. "Measured" and "estimated" mean what they say; a size nobody
   has timed says "not measured".
 - **All settings** opens every training setting, grouped as in `train.toml`, each with what it
-  does, its default, and a search box. Changed settings are marked and can be reset one at a
-  time. A lock marks the settings that cannot change once a run has started (the network's
-  shape, the word list, the value scale).
+  does, what turning it down or up does, its default, and a search box. Changed settings are
+  marked and can be reset one at a time. A lock marks the settings that cannot change once a run
+  has started (the network's shape, the word list, the value scale).
+- **Tuning guide** (the button at the top of the page, and the link beside All settings) is every
+  setting in one table: what it does, what lower and higher values do, the range worth trying
+  and the default, with a filter box. [TUNING.md](TUNING.md) is the same table with advice on
+  what to watch and what to try for each kind of trouble.
 - **Several runs.** "Add another run" copies the run being edited so one or two settings can be
   changed; the panel on the right lists what differs. Then choose how to run them:
   - **One after another** queues them. One run trains at a time, and a queued run also waits
@@ -100,12 +109,23 @@ at the same time is worth it only when the runs should see the same wall-clock h
 they are small enough that the GPU is not the limit. GPU memory adds up when runs share it, and
 the app warns when the total would not fit.
 
-**History** lists every run with its status, size, games, speed and latest results against both
-baselines. From a row: Stop (the run finishes its step, evaluates, saves a checkpoint and
-stops), Cancel for a queued run, Resume (for another stretch of hours, optionally with changed
-settings), and Delete (the folder and its checkpoints, after a confirmation). Tick two or more
-runs and press **Compare** for their strength curves on one chart, a table of results, and the
-settings that differ between them.
+**History** lists every run with its status, a verdict, a small chart of its strength over the
+run, its latest results against both baselines, games, speed and time. The verdict is one of
+**Beats the baseline** (the latest evaluation's whole interval is above zero), **Level with the
+baseline**, **Behind the baseline**, or **Got worse** (the latest evaluation is significantly
+below the run's own best: training made it worse); hover it for the sentence behind it. From a
+row: **Charts** (the run's page, also reached by clicking its name), Stop (the run finishes its
+step, evaluates, saves a checkpoint and stops), Cancel for a queued run, Resume (for another
+stretch of hours, optionally with changed settings), **Rename**, and Delete (the folder and its
+checkpoints, after a confirmation). Tick two or more runs and press **Compare** for their
+strength curves on one chart, a table of results, and the settings that differ between them.
+
+**Renaming.** Rename is on a run's History row, on its page, and on each of its models on the
+Models page. Models are named after the run that trained them, so renaming a run renames all of
+its models: `night1 (best)` becomes `sixty-four (best)`. The run's folder is renamed, stars and
+notes follow, matches already played show the new name and can be replayed, and games in progress
+carry on. A run cannot be renamed while it is running, stopping or queued, or while a match using
+one of its models is still running. Names take letters, digits, `-` and `_`.
 
 A result is written as **+4.2 ± 7.8**: the average points per game by which the network beat
 that opponent over seat-swapped pairs of games, and the half-width of the 95% interval. A green
@@ -113,19 +133,33 @@ triangle means the whole interval is above zero, which is the only thing this ap
 
 ### A run's page
 
-Click a run's name. The six figures at the top are live while it trains.
+Click a run's name or its Charts button. The six figures at the top are live while it trains.
 
-- **Progress.** Strength against greedy + leave (the baseline to beat) and against greedy, with
-  the interval shaded and a flag at each new best network; how well the network predicts games
-  it has not trained on, next to the leave values alone (the earliest sign of learning, long
-  before the evaluations separate from zero); then loss, speed, exploration temperature, scores,
-  bingos, game length and replay size. Charts can be drawn against games, hours or steps, and
-  every chart has a table view.
+- **Progress** opens with **How it went**: the verdict in a sentence, and, when the run got worse
+  or is predicting new games worse than leave values alone, a note saying so with a link to the
+  tuning guide. Then the charts, in four groups:
+  - **Strength against the baselines**: against greedy + leave (the baseline to beat) and against
+    greedy, with the 95% interval shaded and a flag at each new best network.
+  - **Is it learning?** The network's error on games it has not trained on beside the error of
+    leave values alone, and beside its error on the positions it trains on (runs made after
+    13 November 2026 record that; seen falling while unseen rises is memorising). The network's
+    edge over leave values, which is the earliest sign of learning and should rise above zero.
+    Each new network against the best so far, with promotions and any return to the best network
+    by the guard marked. Win rates against the bots, scores in evaluation, and how accurate the
+    win-probability estimate is.
+  - **Training**: value loss, win loss, the learning rate (it steps down each time the guard goes
+    back to the best network) and the replay buffer.
+  - **Self-play games**: speed, exploration temperature, mean score, margin of victory, how often
+    the first player wins, bingos, exchanges and passes, and game length.
+
+  Charts can be drawn against games, hours or steps, with light or heavy smoothing, and every
+  chart has a table view.
 - **Report.** A plain-language verdict that never claims a win the interval does not support,
   the numbers that matter, and a timeline of what happened: when self-play began, the first
   significant result, each new best network, drops between evaluations larger than noise
-  explains, plateaus, loss spikes, slowdowns, record scores, and how each session ended. Click
-  an event to mark it on the chart.
+  explains, the point where the network began predicting new games worse than leave values
+  alone, each time the guard went back to the best network, plateaus, loss spikes, slowdowns,
+  record scores, and how each session ended. Click an event to mark it on the chart.
 - **Settings.** The run's full configuration, with what differs from the defaults marked.
 - **Log.** The console output, followed live.
 - **Checkpoints.** Every saved network, each with Play against it, Watch it play, and Run a match.
@@ -134,7 +168,8 @@ Click a run's name. The six figures at the top are live while it trains.
 
 Every network the runs have saved, best of each run first, with the size, the games it had
 played when saved, and its evaluation from training. Star the ones worth keeping track of and
-add notes. A model trained with a different word list or with leave values that have since been
+add notes. **Rename run** on a model's row renames the run it came from, and so every model of
+that run (see Renaming, above). A model trained with a different word list or with leave values that have since been
 refitted is shown but cannot be played, and says why. Below the table is a small leave-value
 explorer: type some tiles to see what keeping them is worth.
 

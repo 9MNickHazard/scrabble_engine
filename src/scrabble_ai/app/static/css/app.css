@@ -730,3 +730,160 @@ div.ov-progress-text.muted { margin: 16px 0 18px; color: var(--text-muted); }
   .arena-hero { flex-direction: column; align-items: flex-start; gap: var(--space-3); }
 }
 /* ---- end overview / run / arena ---- */
+
+/* ---- run health, verdict, rename, tuning guide ----
+ * How a run went, shown where it will be seen (Training history, Overview, the run page), the
+ * rename dialog, and the tuning guide (#/guide). Prefixes: hl- (health chip, sparkline cell),
+ * vb- (verdict banner), ov-latest- (Overview's latest run), run-group/run-cap (Progress tab
+ * groups and captions), rn- (rename dialog), gd- (guide), tm-effect (effects lines in the form).
+ */
+
+/* The verdict chip: a pill outlined in black like a badge, washed with the reserved status
+ * colour, with its icon and always its label. */
+.hl-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px 0 7px; border-radius: var(--radius-pill);
+  border: 1px solid var(--outline); background: var(--surface-2); color: var(--text-primary); font-size: var(--text-s); font-weight: 600;
+  line-height: 1; white-space: nowrap; cursor: default; box-shadow: var(--rim); }
+.hl-chip .tm-icon { color: var(--text-muted); }
+.hl-good { background: var(--good-wash); }
+.hl-good .tm-icon { color: var(--good); }
+.hl-warning { background: var(--warning-wash); }
+.hl-warning .tm-icon { color: color-mix(in srgb, var(--warning) 70%, var(--text-primary)); }
+.hl-critical { background: var(--critical-wash); }
+.hl-critical .tm-icon { color: var(--critical); }
+.hl-level { background: var(--surface-3); }
+.hl-spark { display: inline-block; line-height: 0; }
+
+/* Training history: the run's name reads as a link, the row as a way in. */
+.tm-history-table .tm-run-link, .tm-models .tm-run-link { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px;
+  text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.tm-history-table .tm-run-link:hover, .tm-models .tm-run-link:hover { color: var(--accent-hover); text-decoration-color: currentColor; }
+.tm-run-link { display: inline-flex; align-items: center; gap: 2px; }
+.tm-run-link-go { opacity: 0.7; }
+.tm-history-table tbody tr.clickable:hover .tm-run-link { text-decoration-color: currentColor; }
+.tm-history-table .tm-net { color: var(--text-secondary); font-weight: 600; }
+.tm-history-table td { vertical-align: middle; }
+.tm-history-table th, .tm-history-table td { padding-left: 8px; padding-right: 8px; }
+.tm-history-table th:first-child, .tm-history-table td:first-child { padding-left: 20px; }
+.tm-history-table th:last-child, .tm-history-table td:last-child { padding-right: 20px; }
+.tm-history-table .tm-name-cell { min-width: 150px; max-width: 240px; }
+.tm-history-table .tm-run-link { overflow-wrap: anywhere; }
+.tm-history-table .tm-error-line { max-width: 170px; }
+.tm-status-cell { white-space: nowrap; }
+.tm-status-line { display: flex; align-items: center; gap: var(--space-2); }
+.tm-status-line .tm-sub { margin: 0; }
+.tm-health { display: flex; width: max-content; margin-top: 6px; }
+.tm-greedy-line { font-variant-numeric: tabular-nums; }
+.tm-trend-cell { width: 1%; }
+.tm-charts { padding-left: 10px; }
+.tm-tip { display: inline-flex; }
+.tm-all-summary a { color: var(--accent); }
+/* Models: the run-level actions (Rename run, Open run) wrap under Play, Watch and Match. */
+.tm-models .tm-actions { flex-wrap: wrap; row-gap: 4px; width: 276px; margin: -4px 0 -4px auto; }
+
+/* Run page: the verdict banner at the top of Progress. */
+.vb { display: flex; flex-direction: column; gap: var(--space-3); margin-bottom: var(--space-4); padding: 18px 24px; }
+.vb-top { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); }
+.vb-main { min-width: 0; }
+.vb-label { display: flex; align-items: center; gap: var(--space-3); margin-bottom: 6px; font-size: var(--text-s); font-weight: 600; color: var(--text-secondary); }
+.vb-headline { max-width: 88ch; font-size: 17px; font-weight: 600; line-height: 1.4; color: var(--text-primary); }
+.vb-actions { display: flex; flex: none; gap: var(--space-2); }
+.vb-notice { align-items: flex-start; }
+.vb-notice .dash-notice-icon { color: color-mix(in srgb, var(--warning) 70%, var(--text-primary)); }
+.vb-notice a { white-space: nowrap; }
+.vb-loading { font-size: var(--text-s); }
+.run-head .run-title .hl-chip { height: 26px; }
+.run-head > div:first-child { flex: 1; min-width: 0; }
+.run-head .lede { max-width: none; }
+
+/* Run page: the groups of small charts, each chart with a line on how to read it. */
+.run-group { margin-top: var(--space-6); }
+.run-group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px var(--space-3); padding: 0 var(--space-1); }
+.run-group-head h2 { font-size: var(--text-l); font-weight: 650; text-shadow: 0 0 10px var(--page), 0 0 4px var(--page); }
+.run-group-head p { font-size: var(--text-s); color: var(--text-secondary); text-shadow: 0 0 10px var(--page), 0 0 4px var(--page); }
+.run-group .run-grid { margin-top: var(--space-3); }
+.run-group .card { display: flex; flex-direction: column; }
+.run-cap { margin-top: auto; padding-top: var(--space-2); font-size: var(--text-s); line-height: 1.45; color: var(--text-secondary); }
+.run-small-card .run-cap { font-size: var(--text-xs); line-height: 1.45; }
+.report-health { margin: calc(-1 * var(--space-3)) 0 var(--space-5); max-width: 110ch; }
+.report-health .hl-chip { vertical-align: middle; margin-right: 4px; }
+.report-health a { white-space: nowrap; }
+
+/* Overview: the latest run, when nothing is training. */
+.ov-latest { display: flex; flex-direction: column; gap: 10px; padding: 16px 22px; }
+.ov-latest-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.ov-latest-titles { min-width: 0; }
+.ov-latest-eyebrow { margin-bottom: 4px; font-size: var(--text-s); color: var(--text-muted); }
+.ov-latest-name { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.ov-latest-name:hover { text-decoration-color: currentColor; }
+.ov-latest-note { max-width: 120ch; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.ov-latest-note.is-bad { padding-left: var(--space-3); border-left: 3px solid var(--warning); color: var(--text-primary); }
+.ov-latest-body { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.ov-latest-figures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4) var(--space-3); margin: 6px 0 0; }
+.ov-latest-figures .ov-figure dd { display: flex; flex-direction: column; font-size: inherit; font-weight: inherit; }
+.ov-latest-value { font-size: 18px; font-weight: 650; white-space: nowrap; }
+.ov-latest-value .stat-ci { font-size: var(--text-s); font-weight: 550; color: var(--text-secondary); }
+.ov-figure-hint { font-size: var(--text-s); font-weight: 400; color: var(--text-muted); }
+.ov-latest-chart { min-width: 0; }
+.ov-run-row .ov-row-link { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.ov-run-row:hover .ov-row-link { text-decoration-color: currentColor; }
+.ov-row-go { flex: none; display: inline-grid; color: var(--text-muted); }
+.ov-run-row:hover .ov-row-go { color: var(--text-primary); }
+.ov-row-side .ov-row-chip { height: 20px; margin-top: 3px; padding: 0 8px 0 6px; font-size: var(--text-xs); }
+.ov-row-side { display: flex; flex-direction: column; align-items: flex-end; }
+@media (min-width: 1101px) { .ov-bottom { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, 1fr); } }
+@media (max-width: 1100px) { .ov-latest-body { grid-template-columns: 1fr; } }
+
+/* The rename dialog. */
+.rn { display: flex; flex-direction: column; gap: var(--space-3); color: var(--text-secondary); }
+.rn-lede { line-height: 1.5; }
+.rn-lede strong { color: var(--text-primary); }
+.rn-current { display: flex; align-items: baseline; gap: var(--space-3); }
+.rn-current-name { font-family: var(--font-mono); font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; }
+.rn-input { font-family: var(--font-mono); }
+.rn-input.is-error { border-color: var(--critical); box-shadow: 0 0 0 1px var(--critical); }
+.rn-msg { display: flex; align-items: flex-start; gap: 6px; font-size: var(--text-s); line-height: 1.4; color: var(--text-primary); }
+.rn-msg .tm-icon { margin-top: 1px; color: var(--critical); }
+.rn-effect { font-size: var(--text-s); line-height: 1.5; color: var(--text-secondary); }
+.rn .modal-actions { margin-top: var(--space-2); }
+
+/* The tuning guide (#/guide). */
+.gd-page { display: flex; flex-direction: column; gap: var(--space-4); padding-bottom: var(--space-6); }
+.gd-page > .page-head { margin-bottom: 0; }
+.gd-head .lede { max-width: 96ch; }
+.gd-back-icon { transform: rotate(180deg); }
+.gd-tools { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.gd-search { width: 300px; }
+.gd-count { font-size: var(--text-s); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.gd-notices:empty { display: none; }
+.gd-card { padding: 0; overflow: clip; }
+.gd-loading { padding: var(--space-5); }
+.gd-table { table-layout: fixed; }
+.gd-c-setting { width: 15%; } .gd-c-help { width: 22%; } .gd-c-effect { width: 20%; } .gd-c-typical { width: 14%; } .gd-c-default { width: 9%; }
+.gd-table thead th { position: sticky; top: -2px; z-index: 2; background: var(--solid); white-space: normal; }
+.gd-table th, .gd-table td { padding: 10px 12px; vertical-align: top; font-size: 13px; line-height: 1.45; }
+.gd-table th:first-child, .gd-table td:first-child { padding-left: var(--space-5); }
+.gd-table th:last-child, .gd-table td:last-child { padding-right: var(--space-5); }
+.gd-section th { padding-top: var(--space-4); background: var(--surface-2); text-align: left; font-weight: 400; }
+.gd-section-title { font-size: var(--text-m); font-weight: 650; color: var(--text-primary); }
+.gd-section-desc { display: block; margin-top: 2px; font-size: var(--text-s); color: var(--text-secondary); }
+.gd-setting { font-weight: 400; text-align: left; }
+.gd-label { display: flex; align-items: center; gap: 6px; font-weight: 650; color: var(--text-primary); }
+.gd-setting .tm-key { display: block; margin-top: 2px; overflow-wrap: anywhere; }
+.gd-help { color: var(--text-secondary); }
+.gd-effect { color: var(--text-secondary); }
+.gd-effect-k { font-weight: 650; color: var(--text-primary); }
+.gd-typical { color: var(--text-primary); }
+.gd-default-cell { font-variant-numeric: tabular-nums; }
+.gd-default { font-weight: 600; color: var(--text-primary); }
+.gd-unit { color: var(--text-muted); font-size: var(--text-s); }
+.gd-none td { padding: var(--space-6) var(--space-4); text-align: center; color: var(--text-muted); }
+.gd-none strong { color: var(--text-secondary); }
+
+/* Effects under a setting's help: quieter than the help so the list stays scannable. */
+.tm-effects { display: flex; flex-direction: column; gap: 1px; max-width: 74ch; margin-top: 5px; }
+.tm-effect { font-size: var(--text-xs); line-height: 1.5; color: var(--text-muted); }
+.tm-effect-k { font-weight: 650; color: var(--text-secondary); }
+
+/* ---- end run health, verdict, rename, tuning guide ---- */

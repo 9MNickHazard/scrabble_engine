@@ -1,14 +1,17 @@
 /* Overview: #/overview, the landing page.
  *
  * What is training now (a card per active run with progress, speed, the latest result against
- * greedy + leave and a sparkline of that result), the queue, the GPU, the strongest network of
- * each run, recent runs and recent matches. Before anything has been trained it shows a short
- * welcome that points to the Training page.
+ * greedy + leave and a sparkline of that result), or when nothing is, the latest run: how it
+ * went in a sentence, its strength chart with the interval, a few figures and a way to all its
+ * charts. Then the queue, the GPU, the strongest network of each run, recent runs (each with its
+ * verdict) and recent matches. Before anything has been trained it shows a short welcome that
+ * points to the Training page.
  */
 (function () {
   "use strict";
 
   const { h, fmt } = App;
+  const kit = () => window.LabKit;  // views/training.js loads after this file
 
   const ICON_OVERVIEW = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">' +
     '<rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/>' +
@@ -29,7 +32,7 @@
   App.registerView("overview", { title: "Overview", nav: true, order: 10, icon: ICON_OVERVIEW, mount });
 
   function mount(container) {
-    const state = { runs: null, models: null, matches: null, metrics: {}, signatures: {} };
+    const state = { runs: null, models: null, matches: null, metrics: {}, signatures: {}, headlines: {} };
     const els = {
       head: h("div"),
       top: h("div", { class: "ov-top" }),
@@ -61,7 +64,26 @@
     state.matches = matches.status === "fulfilled" ? matches.value.matches || [] : null;
     const active = state.runs.filter(isLive);
     await Promise.all(active.map((run) => loadEvals(state, run.name)));
+    const latest = active.length ? null : latestRun(state.runs);
+    if (latest) {
+      await loadEvals(state, latest.name);
+      // An older server sends no verdict: the report's headline says how the run went instead.
+      const key = latest.name + "@" + latest.updated;
+      if (latest.health === undefined && state.headlines.key !== key) {
+        try {
+          const report = await App.get(`/api/runs/${encodeURIComponent(latest.name)}/report`);
+          state.headlines = { key, text: report.headline || "" };
+        } catch (error) {
+          state.headlines = { key, text: "" };
+        }
+      }
+    }
     render(state, els);
+  }
+
+  /** The run updated most recently, of those that are not waiting in the queue. */
+  function latestRun(runs) {
+    return runs.filter((r) => r.status !== "queued").sort((a, b) => (b.updated || 0) - (a.updated || 0))[0] || null;
   }
 
   /** Keep each active run's evaluations against greedy + leave for its sparkline. */
@@ -136,7 +158,10 @@
       lede += queued.length ? `, ${queued.length} queued.` : ".";
       if (best) {
         const e = best.eval["greedy-leave"];
-        lede += ` The strongest network so far is ${best.name}, ${fmt.spread(e.spread, e.ci)} points a game against greedy + leave.`;
+        const ci = typeof e.ci === "number" ? e.ci : 0;
+        if (e.spread - ci > 0) lede += ` The strongest network so far is ${best.name}, ${fmt.spread(e.spread, e.ci)} points a game against greedy + leave.`;
+        else if (e.spread + ci < 0) lede += ` No network has beaten greedy + leave yet: the closest, ${best.name}, is at ${fmt.spread(e.spread, e.ci)} points a game.`;
+        else lede += ` No network has been shown to beat greedy + leave yet: the strongest, ${best.name}, is level with it at ${fmt.spread(e.spread, e.ci)}.`;
       }
     }
     section(state, "head", els.head, [lede, !runs.length], (el) => el.replaceChildren(h("div", { class: "page-head" },
@@ -167,7 +192,7 @@
     section(state, "strongest", els.strongest, top.map((m) => [m.id, m.eval, m.games]), (el) => renderStrongest(el, top));
     const recent = runs.filter((r) => !isLive(r) && r.status !== "queued")
       .sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 5);
-    section(state, "runs", els.runs, recent.map((r) => [r.name, r.status, r.latest_eval, Math.floor(Date.now() / 60000)]),
+    section(state, "runs", els.runs, recent.map((r) => [r.name, r.status, r.latest_eval, r.health, Math.floor(Date.now() / 60000)]),
       (el) => renderRuns(el, recent));
     renderMatches(state, els);
   }
@@ -175,17 +200,29 @@
   function renderActive(state, els, active, queued, runs) {
     const nodes = active.map((run) => activeCard(state, run));
     if (!active.length) {
-      const last = runs.filter((r) => r.status === "finished" || r.status === "stopped")
-        .sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
-      const e = last && last.latest_eval && last.latest_eval["greedy-leave"];
-      nodes.push(h("div", { class: "card ov-idle" },
-        h("div", null,
-          h("h2", null, "No training running"),
-          h("p", { class: "secondary" }, last
-            ? [`The last run, `, h("a", { href: `#/run/${encodeURIComponent(last.name)}` }, last.name), ` ${last.status === "finished" ? "finished" : "stopped"} ${fmt.ago(last.updated)}`,
-              e ? `, at ${fmt.spread(e.spread, e.ci)} against greedy + leave (${verdict(e.spread, e.ci)}).` : "."]
-            : "Start a run on the Training page; it appears here while it trains.")),
-        h("div", { class: "page-actions" }, h("a", { class: "button button-primary", href: "#/training" }, "Start a run"))));
+      const last = latestRun(runs);
+      if (last) {
+        // Rebuilt only when what it shows changes, so its chart keeps its hover between refreshes.
+        const evals = (state.metrics[last.name] || { gl: [] }).gl;
+        const sig = JSON.stringify([last.name, last.status, last.updated, last.health, last.best_eval, evals.length,
+          state.headlines.text, Math.floor(Date.now() / 60000)]);
+        if (state.latestSig !== sig || !state.latestCard) {
+          if (state.latestChart) state.latestChart.destroy();
+          const built = latestCard(state, last);
+          state.latestCard = built.card;
+          state.latestChart = built.chart;
+          state.latestSig = sig;
+        }
+        nodes.push(state.latestCard);
+      } else {
+        nodes.push(h("div", { class: "card ov-idle" },
+          h("div", null, h("h2", null, "No training running"),
+            h("p", { class: "secondary" }, "Start a run on the Training page; it appears here while it trains.")),
+          h("div", { class: "page-actions" }, h("a", { class: "button button-primary", href: "#/training" }, "Start a run"))));
+      }
+    } else {
+      state.latestSig = null;
+      state.latestCard = null;
     }
     if (queued.length) {
       nodes.push(h("div", { class: "ov-queue" },
@@ -194,8 +231,60 @@
           h("span", { class: "muted" }, ` (${r.network}${r.limit && r.limit.hours ? `, ${hoursText(r.limit.hours)}` : ""})`)])),
         h("span", { class: "muted" }, active.length ? "starts when the current run ends" : "starts shortly")));
     }
-    els.active.replaceChildren(...nodes);
+    if (nodes.length !== els.active.childNodes.length || nodes.some((node, i) => els.active.childNodes[i] !== node)) {
+      els.active.replaceChildren(...nodes);
+    }
     els.active.classList.toggle("ov-active-multi", active.length > 1);
+  }
+
+  /** The latest run, when nothing is training: how it went, its strength chart, a few figures. */
+  function latestCard(state, run) {
+    const K = kit();
+    const href = `#/run/${encodeURIComponent(run.name)}`;
+    const evals = (state.metrics[run.name] || { gl: [] }).gl;
+    const le = run.latest_eval && run.latest_eval["greedy-leave"];
+    let best = run.best_eval || null;
+    if (!best && evals.length) {
+      const top = evals.reduce((a, e) => (e.spread > a.spread ? e : a), evals[0]);
+      best = { games: top.games, spread: top.spread, ci: top.ci };
+    }
+    const note = run.health ? run.health.note : run.health === undefined ? state.headlines.text : null;
+    const when = { finished: "finished", stopped: "stopped", failed: "failed" }[run.status] || "updated";
+    const slot = h("div", { class: "ov-latest-chart" });
+    const card = h("section", { class: "card ov-latest", "aria-label": "Latest run" },
+      h("div", { class: "ov-latest-head" },
+        h("div", { class: "ov-latest-titles" },
+          h("div", { class: "ov-latest-eyebrow" }, `Latest run · ${when} ${fmt.ago(run.updated)} · nothing is training now`),
+          h("div", { class: "ov-run-head" },
+            h("h2", null, h("a", { class: "ov-latest-name", href }, run.name)),
+            statusBadge(run.status), K ? K.healthChip(run.health) : null,
+            h("span", { class: "muted" }, run.network))),
+        h("div", { class: "page-actions" },
+          h("a", { class: "button button-primary", href }, K ? K.icon("chart", 15) : null, "Open all charts"),
+          h("a", { class: "button", href: "#/training" }, "Start a run"))),
+      note ? h("p", { class: "ov-latest-note" + (run.health && (run.health.state === "worse" || run.health.state === "behind") ? " is-bad" : "") },
+        fmt.prose(note)) : run.health === null ? h("p", { class: "ov-latest-note" }, "It was never evaluated, so there is no verdict.") : null,
+      h("div", { class: "ov-latest-body" },
+        h("dl", { class: "ov-latest-figures" },
+          figure("Latest evaluation", spreadNode(le ? le.spread : null, le ? le.ci : null, "ov-latest-value"),
+            le ? verdict(le.spread, le.ci) : "not evaluated"),
+          figure("Best evaluation", spreadNode(best ? best.spread : null, best ? best.ci : null, "ov-latest-value"),
+            best ? `at ${fmt.compact(best.games)} games` : "none yet"),
+          figure("Trained", h("span", { class: "ov-latest-value" }, `${fmt.compact(run.games)} games`), `in ${fmt.duration(run.hours)}`),
+          figure("Network", h("span", { class: "ov-latest-value" }, run.network || "–"),
+            run.parameters ? `${fmt.compact(run.parameters)} parameters` : null)),
+        slot));
+    const chart = Charts.line(slot, {
+      title: "Strength against greedy + leave, at each evaluation",
+      series: [{ name: "Greedy + leave", points: evals.map((e) => [e.games, e.spread]),
+        band: evals.map((e) => [e.games, e.spread - e.ci, e.spread + e.ci]), color: "var(--series-1)" }],
+      x: { label: "games", format: (v) => fmt.int(v), tooltipFormat: (v) => fmt.int(v) + " games", tickFormat: "auto" },
+      y: { label: "points per game · 95% interval shaded", format: (v) => fmt.signed(v),
+        tickFormat: (v) => (v === 0 ? "0" : fmt.signed(v, Number.isInteger(v) ? 0 : 1)) },
+      referenceY: [{ y: 0, label: "even" }], height: 172, legend: false,
+      empty: run.status === "failed" ? "It failed before its first evaluation." : "No evaluation was recorded.",
+    });
+    return { card, chart };
   }
 
   function activeCard(state, run) {
@@ -216,6 +305,7 @@
         h("div", { class: "ov-run-head" },
           h("h2", null, run.name),
           statusBadge(run.status, run.status === "running" && run.phase ? PHASE[run.phase] : null),
+          kit() ? kit().healthChip(run.health) : null,
           h("span", { class: "muted" }, run.network)),
         progress ? h("div", { class: "ov-progress" },
           h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100",
@@ -243,8 +333,9 @@
     return card;
   }
 
-  function figure(label, value) {
-    return h("div", { class: "ov-figure" }, h("dt", null, label), h("dd", null, value));
+  function figure(label, value, hint) {
+    return h("div", { class: "ov-figure" }, h("dt", null, label), h("dd", null, value,
+      hint ? h("span", { class: "ov-figure-hint" }, hint) : null));
   }
 
   function renderGpu(els) {
@@ -298,16 +389,22 @@
   }
 
   function renderRuns(el, recent) {
+    const K = kit();
     el.replaceChildren(listHead("Recent runs", null, "#/training", "All runs"),
       recent.length ? h("ul", { class: "ov-list" }, recent.map((run) => {
         const e = run.latest_eval && run.latest_eval["greedy-leave"];
-        return h("li", null, h("a", { class: "ov-row", href: `#/run/${encodeURIComponent(run.name)}` },
+        const chip = K ? K.healthChip(run.health, "ov-row-chip") : null;
+        return h("li", null, h("a", { class: "ov-row ov-run-row", href: `#/run/${encodeURIComponent(run.name)}`,
+          title: `Open ${run.name}: its charts, report, settings and log` },
           h("div", { class: "ov-row-main" },
-            h("div", { class: "ov-row-title" }, h("span", { class: "ov-row-name" }, run.name), statusBadge(run.status)),
-            h("div", { class: "ov-row-sub" }, `${run.network} · ${fmt.duration(run.hours)} · ${fmt.compact(run.games)} games · ${fmt.ago(run.updated)}`)),
+            h("div", { class: "ov-row-title" }, h("span", { class: "ov-row-name ov-row-link" }, run.name)),
+            h("div", { class: "ov-row-sub", title: `${(STATUS[run.status] || [run.status])[0]} ${fmt.datetime(run.updated)} · ${run.network} · ` +
+              `${fmt.duration(run.hours)} · ${fmt.int(run.games)} games` },
+            `${(STATUS[run.status] || [run.status])[0]} ${fmt.ago(run.updated)} · ${run.network} · ${fmt.compact(run.games)} games`)),
           h("div", { class: "ov-row-side" },
             spreadNode(e ? e.spread : null, e ? e.ci : null, "ov-row-value"),
-            h("div", { class: "ov-row-sub" }, e ? verdict(e.spread, e.ci) : run.status === "failed" ? "no result" : "not evaluated"))));
+            chip || h("div", { class: "ov-row-sub" }, e ? verdict(e.spread, e.ci) : run.status === "failed" ? "no result" : "not evaluated")),
+          h("span", { class: "ov-row-go", html: ICON_ARROW, "aria-hidden": "true" })));
       })) : h("p", { class: "muted ov-none" }, "Finished runs appear here."));
   }
 

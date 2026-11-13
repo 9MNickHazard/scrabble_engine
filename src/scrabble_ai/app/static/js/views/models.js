@@ -1,11 +1,14 @@
 /* Models: the library of everything that can play. The built-in bots in a strip, the trained
  * networks in a sortable table (the run's best by default, every checkpoint on request), stars
- * and notes, and a small leave-value explorer.
+ * and notes, "Rename run" on every row (models are named after their run), and a small
+ * leave-value explorer. GET /api/runs says which runs are busy (no renaming while one trains,
+ * stops or waits in the queue); without it the server still refuses those.
  *
- * Uses window.LabKit from views/training.js (icons, spread cells, sortable headers, menus).
+ * Uses window.LabKit from views/training.js (icons, spread cells, sortable headers, menus, the
+ * rename dialog).
  *
  * Mock-only demo states (with ?mock=1):
- *   #/models?demo=empty | many | checkpoints | menu | note
+ *   #/models?demo=empty | many | checkpoints | menu | note | rename
  */
 (function () {
   "use strict";
@@ -45,8 +48,16 @@
     if (demo === "checkpoints") lib.all = true;
     let bots = [];
     let models = [];
+    let runs = null;  // GET /api/runs, for each run's status; null if it could not be read
     let lastKey = "";
     const refs = {};
+    const loadRuns = async () => {
+      try {
+        runs = (await App.get("/api/runs")).runs || [];
+      } catch (error) {
+        runs = null;
+      }
+    };
 
     const botsHost = h("section", { class: "tm-strip", "aria-labelledby": "tm-bots-title" });
     const libHost = h("div");
@@ -59,10 +70,10 @@
 
     const path = "/api/models" + (demo === "empty" || demo === "many" ? `?demo=${demo}` : "");
     try {
-      const data = await App.get(path);
+      const [data] = await Promise.all([App.get(path), loadRuns()]);
       bots = data.bots || [];
       models = data.models || [];
-      lastKey = JSON.stringify(data);
+      lastKey = JSON.stringify([data, runs && runs.map((r) => [r.name, r.status])]);
     } catch (error) {
       libHost.replaceChildren(h("div", { class: "notice notice-critical" }, K.icon("alert", 18, "tm-tone-critical"),
         h("div", null, h("strong", null, "Could not load the models. "), String(error.message || error))));
@@ -77,15 +88,22 @@
     App.every(30000, async () => {
       if (first) { first = false; return; }
       if (K.isMenuOpen() || (document.activeElement && document.activeElement.classList.contains("tm-note-input"))) return;
-      const data = await App.get(path);
-      const key = JSON.stringify(data);
-      if (key === lastKey) return;
+      await reload(false);
+    });
+
+    /** Fetch the models and the runs' states again; re-render when anything changed. */
+    async function reload(force) {
+      const [data] = await Promise.all([App.get(path), loadRuns()]);
+      const key = JSON.stringify([data, runs && runs.map((r) => [r.name, r.status])]);
+      if (key === lastKey && !force) return;
       lastKey = key;
       bots = data.bots || [];
       models = data.models || [];
       renderBots();
       renderLibrary();
-    });
+    }
+
+    if (demo === "rename") setTimeout(() => { const b = libHost.querySelector(".tm-rename-run:not(:disabled)"); if (b) b.click(); }, 600);
 
     // Mock-only demo states; the delay lets a headless browser finish its start-up resizes,
     // which would close a menu.
@@ -316,8 +334,25 @@
         h("button", { type: "button", class: "button button-small", disabled: !ok, title: why || `Watch ${m.name} play`,
           onclick: () => App.go(`#/watch?a=${spec}`) }, K.icon("eye", 14), "Watch"),
         match,
+        renameButton(m),
         h("button", { type: "button", class: "button button-small button-ghost tm-iconbtn", "aria-label": `Open run ${m.run}`,
           title: `Open run ${m.run}`, onclick: () => App.go("#/run/" + encodeURIComponent(m.run)) }, K.icon("open", 15)));
+    }
+
+    /** "Rename run": models are named after their run, so renaming one is renaming the run. */
+    function renameButton(m) {
+      const run = runs ? runs.find((r) => r.name === m.run) || null : null;
+      const blocked = K.renameBlocked(run);
+      return h("span", { class: "tm-tip", title: blocked || `Rename the run ${m.run}, and with it all its models` },
+        h("button", { type: "button", class: "button button-small button-ghost tm-rename-run", disabled: !!blocked,
+          "aria-label": `Rename run ${m.run}`, onclick: () => K.renameDialog({
+            name: m.run, run, names: runs ? runs.map((r) => r.name) : null, fromModels: true,
+            modelCount: models.filter((x) => x.run === m.run).length,
+            onRenamed: async (to) => {
+              if (lib.run === m.run) lib.run = to;
+              await reload(true);
+            },
+          }) }, K.icon("pencil", 13), "Rename run"));
     }
 
     function matchItems(m) {
