@@ -19,38 +19,46 @@ a window of their own. Closing the window ends the app. **Training runs and matc
 processes and keep going with the app closed**; the app finds them again the next time it opens.
 Opening the shortcut while the app is already running shows the same app again.
 
-### The glass window
+### The look: liquid glass
 
-On Windows the window is see-through: the desktop and whatever is open behind the app show
-through it. Not everything is glass:
+Every pane of the app is a sheet of frosted glass: translucent, with a bright rim, rounded
+corners and a black outline, the way lead holds the panes of a stained-glass window. Buttons,
+inputs and tabs are pills. The board, its tiles and the racks are solid, since they are what you
+are looking at. The app is **light** (white glass) by default, with a **dark** theme (smoked
+glass) in Settings.
 
-- the **page between panels** is nearly clear;
-- **panels** (the sidebar, the top bar, cards, page headings and toolbars) are translucent, each
-  with a solid outline;
-- everything to **read or use** is solid: text, buttons, inputs, menus, dialogs, the board, its
-  tiles and the racks. The title bar and window frame are the ordinary Windows ones.
+What is behind the glass is a choice, also in Settings:
 
-The **See-through** slider at the foot of the sidebar sets how clear the glass is, from solid
-(the ordinary look) to almost all the way through; the app remembers it. Clear glass over a busy
-window is harder to read than over a plain one, so slide it down when it gets in the way.
+- **Frosted desktop** (the default in the app's own window): your desktop and the windows behind
+  the app show through it, blurred by Windows, so the glass takes its colour from whatever it is
+  in front of.
+- **Clear desktop**: the same, unblurred. Sharp text behind the app competes with the app's own,
+  so the glass is tinted a step more in this mode.
+- **Built-in**: the app's own soft backdrop, with nothing showing through. This is what a browser
+  window gets, since a browser window cannot be see-through.
+
+The **Tint** slider sets how milky the glass is: clearer shows more of what is behind it,
+milkier is easier to read. All of it is remembered.
 
 ```powershell
-uv run scrabble-ai app --window edge                      # an ordinary, opaque Edge app window instead
+uv run scrabble-ai app --window edge                      # an ordinary Edge app window (built-in backdrop)
 uv run scrabble-ai app --install-shortcut --window edge   # make the Desktop shortcut open that one
 ```
 
-How it works, for the curious: a browser window cannot be transparent to the desktop, so the
-pages are shown in a WebView2 control (the engine of Microsoft Edge) inside a native window made
-with [pywebview](https://pywebview.flowrl.com/), and the window is switched to per-pixel
-transparency through the Windows compositor (`src/scrabble_ai/app/window.py`). If that window
-cannot be made, the app opens in an Edge app window as before, and if the transparency itself
-cannot be set up the window is simply opaque.
+How the see-through part works, for the curious: a browser window cannot be transparent to the
+desktop, so the pages are shown in a WebView2 control (the engine of Microsoft Edge) inside a
+native window made with [pywebview](https://pywebview.flowrl.com/). The window is switched to
+per-pixel transparency through the Windows compositor, and for the frosted look Windows is asked
+to blur whatever is behind it (the "acrylic" effect); see `src/scrabble_ai/app/window.py`. If
+Windows refuses either, the app says so in Settings and uses its built-in backdrop, and if the
+window cannot be made at all the app opens in an Edge app window.
 
-> **Not yet seen on a screen.** The glass window was built on 2026-11-12 while only headless
-> testing was allowed, so what has been checked is everything short of looking at it: its
-> prerequisites load on this PC, its set-up calls are tested against fakes, and the glass styles
-> were previewed by compositing the pages over a picture of a desktop. This note goes when
-> someone has looked at the real thing.
+> **The see-through window has not been seen on a screen.** It was built on 2026-11-12 while only
+> headless testing was allowed. What has been checked: its prerequisites load on this PC, its
+> set-up calls are tested against fakes, the look itself was checked page by page in a headless
+> browser with the built-in backdrop, and the frosted look was previewed by compositing the pages
+> over a blurred picture of a desktop. Whether Windows really shows and blurs the desktop behind
+> the real window is still to be looked at. This note goes when someone has.
 
 Before the first training run the project needs a word list and leave values
 (see [TRAINING.md](TRAINING.md)); the app says so at the top if either is missing.
@@ -171,6 +179,12 @@ scores; how the estimate settled as games accumulated; the advantage of moving f
 (highest-scoring play, biggest win, closest game, biggest swing between the two games of a pair,
 longest game); and a table of every game. Any game has a Replay button that opens it in Watch.
 
+### Settings
+
+The theme (light or dark), what is behind the glass and how tinted it is (see "The look" above),
+and a few facts about what the app is running on: its version, the word list, whether leave
+values are fitted, and the GPU.
+
 ## Where things are kept
 
 | | |
@@ -196,6 +210,6 @@ The pages are plain JavaScript, CSS and SVG in `src/scrabble_ai/app/static/` wit
 and the server is the Python standard library; [APP_API.md](APP_API.md) is the contract between
 them. `uv run scrabble-ai app --no-window --port 8700` serves without opening a window, and
 adding `?mock=1` to the address runs the pages on invented data with no server behind them
-(`?mock=1&glass=1` adds the glass styles, drawn over the browser's own white).
+(`?mock=1&glass=1` makes the page behave as in its own window, with its background left clear).
 `--runs-dir` and `--data-dir` point the app at other folders. Tests: `uv run pytest
 tests/test_app_*.py tests/test_insights.py`.

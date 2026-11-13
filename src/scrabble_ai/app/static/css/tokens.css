@@ -1,50 +1,60 @@
 /* Design tokens. Every colour, radius and space in the app comes from here.
  *
- * The app is dark by default; <html data-theme="light"> switches. Chart colours follow the
- * validated categorical palette (fixed order, never cycled) and the reserved status colours.
- * Text always wears a text token, never a series colour. */
+ * The look is liquid glass: panes of frosted, translucent glass with a bright rim, generous
+ * corners and a black outline (the lead between panes of stained glass), over a soft backdrop.
+ * The app is light by default; <html data-theme="dark"> switches. --tint (0 to 1, set in
+ * Settings) is how milky the glass is: more tint hides more of what is behind and reads easier.
+ *
+ * Chart colours follow the validated categorical palette (fixed order, never cycled) and the
+ * reserved status colours. Text always wears a text token, never a series colour. */
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
+  --tint: 0.5;
 
-  /* Surfaces */
-  --page: #0d0d0d;
-  --surface-1: #1a1a19;        /* cards, chart surface */
-  --surface-2: #222220;        /* raised: inputs, hovered rows */
-  --surface-3: #2c2c2a;        /* pressed, selected */
-  --border: rgba(255, 255, 255, 0.10);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --overlay: rgba(0, 0, 0, 0.6);
+  /* Surfaces. Panes are glass; --solid is for the few things that must hide what is under them. */
+  --page: #e6ebf3;
+  --solid: #ffffff;
+  --surface-1: rgba(255, 255, 255, calc(0.34 + 0.44 * var(--tint)));   /* panes: cards, rails */
+  --surface-2: rgba(255, 255, 255, calc(0.56 + 0.36 * var(--tint)));   /* raised: inputs, buttons */
+  --surface-3: rgba(222, 229, 240, calc(0.72 + 0.26 * var(--tint)));   /* pressed, selected */
+  --border: rgba(11, 11, 11, 0.13);          /* hairlines inside a pane */
+  --border-strong: rgba(11, 11, 11, 0.30);
+  --outline: #0b0b0b;                        /* the black line round every pane and control */
+  --outline-width: 1.5px;
+  --rim: inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  --sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 46%);
+  --overlay: rgba(22, 28, 38, 0.30);
 
   /* Ink */
-  --text-primary: #f0efec;
-  --text-secondary: #c3c2b7;
-  --text-muted: #898781;
+  --text-primary: #0b0b0b;
+  --text-secondary: #33353b;
+  --text-muted: #5a5c64;
 
   /* Chart chrome */
-  --grid: #2c2c2a;
-  --axis: #383835;
+  --grid: rgba(11, 11, 11, 0.10);
+  --axis: rgba(11, 11, 11, 0.36);
 
   /* Accent (interactive elements) */
-  --accent: #3987e5;
-  --accent-hover: #5598e7;
+  --accent: #2a78d6;
+  --accent-hover: #256abf;
   --accent-ink: #ffffff;
-  --accent-wash: rgba(57, 135, 229, 0.14);
+  --accent-wash: rgba(42, 120, 214, 0.16);
 
   /* Categorical series, in their fixed order */
-  --series-1: #3987e5;  /* blue */
-  --series-2: #d95926;  /* orange */
-  --series-3: #199e70;  /* aqua */
-  --series-4: #c98500;  /* yellow */
-  --series-5: #d55181;  /* magenta */
+  --series-1: #2a78d6;  /* blue */
+  --series-2: #eb6834;  /* orange */
+  --series-3: #1baf7a;  /* aqua */
+  --series-4: #eda100;  /* yellow */
+  --series-5: #e87ba4;  /* magenta */
   --series-6: #008300;  /* green */
-  --series-7: #9085e9;  /* violet */
-  --series-8: #e66767;  /* red */
+  --series-7: #6250d6;  /* violet */
+  --series-8: #e34948;  /* red */
 
   /* Diverging (blue <-> red around a neutral) */
-  --diverge-low: #e66767;
-  --diverge-mid: #383835;
-  --diverge-high: #3987e5;
+  --diverge-low: #e34948;
+  --diverge-mid: #f0efec;
+  --diverge-high: #2a78d6;
 
   /* Status: reserved, always shown with an icon or label */
   --good: #0ca30c;
@@ -52,36 +62,49 @@
   --serious: #ec835a;
   --critical: #d03b3b;
   --good-wash: rgba(12, 163, 12, 0.14);
-  --warning-wash: rgba(250, 178, 25, 0.14);
-  --critical-wash: rgba(208, 59, 59, 0.16);
+  --warning-wash: rgba(250, 178, 25, 0.24);
+  --critical-wash: rgba(208, 59, 59, 0.14);
 
-  /* The board */
-  --board-frame: #121211;
-  --square: #25302b;            /* plain square: muted green felt */
-  --square-line: #161d1a;
-  --square-dl: #2f5f7a;         /* double letter */
-  --square-tl: #1f4f9a;         /* triple letter */
-  --square-dw: #8a4a5e;         /* double word */
-  --square-tw: #a23b2f;         /* triple word */
-  --square-label: rgba(255, 255, 255, 0.55);
-  --tile: #ecdcb0;
-  --tile-edge: #c9b684;
+  /* The board (solid: it is the thing being looked at) */
+  --board-frame: #d9d6cc;
+  --square: #dfe8e1;
+  --square-line: #c5cfc8;
+  --square-dl: #a9d3ea;         /* double letter */
+  --square-tl: #5f97dd;         /* triple letter */
+  --square-dw: #eab4c2;         /* double word */
+  --square-tw: #e2796c;         /* triple word */
+  --square-label: rgba(11, 11, 11, 0.55);
+  --tile: #f3e3b4;
+  --tile-edge: #cdb97f;
   --tile-ink: #1c1a14;
-  --tile-blank-ink: #9a3b2c;    /* a blank's letter */
-  --tile-new: #ffd66b;          /* ring on tiles just placed */
-  --tile-pending: #a8d1ff;      /* tiles the user is placing */
+  --tile-blank-ink: #a3402f;    /* a blank's letter */
+  --tile-new: #d98a00;          /* ring on tiles just placed */
+  --tile-pending: #2a78d6;      /* tiles the user is placing */
 
   /* Shape and rhythm */
-  --radius-s: 4px;
-  --radius-m: 8px;
-  --radius-l: 12px;
+  --radius-s: 8px;
+  --radius-m: 13px;
+  --radius-l: 22px;
+  --radius-pill: 999px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
   --space-6: 32px;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow: 0 18px 44px rgba(15, 23, 42, 0.22);        /* floating things: menus, dialogs */
+  --pane-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);   /* panes resting on the backdrop */
+  --glass-blur: blur(22px) saturate(170%);
+
+  /* What is behind the glass when the desktop is not: a soft, out-of-focus backdrop. */
+  --backdrop:
+    radial-gradient(60% 55% at 12% 8%, rgba(126, 170, 255, 0.60), transparent 70%),
+    radial-gradient(52% 50% at 92% 18%, rgba(255, 196, 160, 0.62), transparent 72%),
+    radial-gradient(58% 56% at 78% 96%, rgba(150, 226, 204, 0.60), transparent 70%),
+    radial-gradient(48% 48% at 18% 92%, rgba(214, 178, 255, 0.52), transparent 72%),
+    #e6ebf3;
+  /* A wash over the desktop when it shows through, so the page is never bare. */
+  --wash: rgba(255, 255, 255, calc(0.08 + 0.34 * var(--tint)));
 
   /* Type */
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -94,60 +117,73 @@
   --text-hero: 48px;
 }
 
-:root[data-theme="light"] {
-  color-scheme: light;
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-  --page: #f9f9f7;
-  --surface-1: #fcfcfb;
-  --surface-2: #f3f2ee;
-  --surface-3: #e9e8e2;
-  --border: rgba(11, 11, 11, 0.10);
-  --border-strong: rgba(11, 11, 11, 0.20);
-  --overlay: rgba(11, 11, 11, 0.4);
+  --page: #0e1117;
+  --solid: #1a1d24;
+  --surface-1: rgba(24, 27, 34, calc(0.34 + 0.44 * var(--tint)));
+  --surface-2: rgba(40, 44, 54, calc(0.56 + 0.36 * var(--tint)));
+  --surface-3: rgba(62, 68, 82, calc(0.72 + 0.26 * var(--tint)));
+  --border: rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.30);
+  --outline: #000000;
+  --rim: inset 0 1px 0 rgba(255, 255, 255, 0.30), inset 0 0 0 1px rgba(255, 255, 255, 0.11);
+  --sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 46%);
+  --overlay: rgba(0, 0, 0, 0.5);
 
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #898781;
+  --text-primary: #f4f4f1;
+  --text-secondary: #d2d1ca;
+  --text-muted: #a5a39b;
 
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
+  --grid: rgba(255, 255, 255, 0.10);
+  --axis: rgba(255, 255, 255, 0.32);
 
-  --accent: #2a78d6;
-  --accent-hover: #256abf;
+  --accent: #3987e5;
+  --accent-hover: #5598e7;
   --accent-ink: #ffffff;
-  --accent-wash: rgba(42, 120, 214, 0.10);
+  --accent-wash: rgba(57, 135, 229, 0.22);
 
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --series-4: #eda100;
-  --series-5: #e87ba4;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
   --series-6: #008300;
-  --series-7: #6250d6;
-  --series-8: #e34948;
+  --series-7: #9085e9;
+  --series-8: #e66767;
 
-  --diverge-low: #e34948;
-  --diverge-mid: #f0efec;
-  --diverge-high: #2a78d6;
+  --diverge-low: #e66767;
+  --diverge-mid: #383835;
+  --diverge-high: #3987e5;
 
-  --good-wash: rgba(12, 163, 12, 0.10);
+  --good-wash: rgba(12, 163, 12, 0.18);
   --warning-wash: rgba(250, 178, 25, 0.18);
-  --critical-wash: rgba(208, 59, 59, 0.10);
+  --critical-wash: rgba(208, 59, 59, 0.20);
 
-  --board-frame: #d9d6cc;
-  --square: #dfe8e1;
-  --square-line: #c5cfc8;
-  --square-dl: #a9d3ea;
-  --square-tl: #5f97dd;
-  --square-dw: #eab4c2;
-  --square-tw: #e2796c;
-  --square-label: rgba(11, 11, 11, 0.55);
-  --tile: #f3e3b4;
-  --tile-edge: #cdb97f;
+  --board-frame: #121211;
+  --square: #25302b;
+  --square-line: #161d1a;
+  --square-dl: #2f5f7a;
+  --square-tl: #1f4f9a;
+  --square-dw: #8a4a5e;
+  --square-tw: #a23b2f;
+  --square-label: rgba(255, 255, 255, 0.55);
+  --tile: #ecdcb0;
+  --tile-edge: #c9b684;
   --tile-ink: #1c1a14;
-  --tile-blank-ink: #a3402f;
-  --tile-new: #d98a00;
-  --tile-pending: #2a78d6;
+  --tile-blank-ink: #9a3b2c;
+  --tile-new: #ffd66b;
+  --tile-pending: #a8d1ff;
 
-  --shadow: 0 8px 24px rgba(11, 11, 11, 0.14);
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  --pane-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+
+  --backdrop:
+    radial-gradient(60% 55% at 12% 8%, rgba(52, 92, 190, 0.55), transparent 70%),
+    radial-gradient(52% 50% at 92% 18%, rgba(150, 74, 62, 0.50), transparent 72%),
+    radial-gradient(58% 56% at 78% 96%, rgba(32, 120, 104, 0.50), transparent 70%),
+    radial-gradient(48% 48% at 18% 92%, rgba(104, 66, 160, 0.48), transparent 72%),
+    #0e1117;
+  --wash: rgba(10, 12, 16, calc(0.08 + 0.34 * var(--tint)));
 }

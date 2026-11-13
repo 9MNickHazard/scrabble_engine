@@ -117,10 +117,12 @@ How it was checked:
 The charts and report pages were checked visually against invented long runs, since no real long
 run exists yet. The first real run is their first real test.
 
-The see-through glass window (added last) has **not been seen on a screen**: it was built while
-only headless testing was allowed. Its prerequisites load, its set-up is tested against fakes, and
-its styles were previewed over a picture of a desktop. If the real window disappoints,
-`--window edge` is the opaque window that was checked on screen.
+The look was then redone as liquid glass (frosted panes, black outlines, light by default with a
+dark theme in Settings) and checked page by page in a headless browser. The see-through window
+that shows the desktop behind the glass has **not been seen on a screen**: it was built while only
+headless testing was allowed. Its prerequisites load, its set-up is tested against fakes, and the
+frosted look was previewed over a blurred picture of a desktop. If the real window disappoints,
+Settings has a built-in backdrop, and `--window edge` opens the app in an Edge window.
 
 Still to do in this phase:
 

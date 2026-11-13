@@ -70,10 +70,37 @@ def test_title_bar_follows_the_theme(dark, expected):
     assert dwm.attribute_calls == [(77, glass.DWMWA_USE_IMMERSIVE_DARK_MODE, expected, 4)]
 
 
+class FakeUser32:
+    def __init__(self, result=1):
+        self.calls = []
+
+        def set_attribute(hwnd, data):
+            attribute = ctypes.cast(data, ctypes.POINTER(glass._CompositionAttribute)).contents
+            policy = ctypes.cast(attribute.Data, ctypes.POINTER(glass._AccentPolicy)).contents
+            self.calls.append((hwnd.value, attribute.Attribute, attribute.SizeOfData, policy.AccentState,
+                               policy.AccentFlags, policy.GradientColor))
+            return result
+
+        self.SetWindowCompositionAttribute = set_attribute
+
+
+def test_frost_is_the_acrylic_accent_with_a_light_tint():
+    user32 = FakeUser32()
+    assert glass.set_frost(55, True, "light", user32) is True
+    red, green, blue, alpha = glass.FROST_TINT["light"]
+    assert user32.calls == [(55, glass.WCA_ACCENT_POLICY, ctypes.sizeof(glass._AccentPolicy),
+                             glass.ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, (alpha << 24) | (blue << 16) | (green << 8) | red)]
+    assert alpha >= 1, "acrylic misbehaves with no tint at all"
+    assert glass.set_frost(55, True, "dark", user32) is True and user32.calls[-1][5] != user32.calls[0][5]
+    assert glass.set_frost(55, False, "light", user32) is True and user32.calls[-1][3] == glass.ACCENT_DISABLED
+    assert glass.set_frost(55, True, "light", FakeUser32(result=0)) is False, "Windows can refuse"
+
+
 def test_bridge_reports_and_never_raises(monkeypatch):
     bridge = glass.Bridge()
-    assert bridge.glass_state() == {"ok": False, "problem": ""}
+    assert bridge.glass_state() == {"ok": False, "frost": False, "frost_available": True, "problem": ""}
     assert bridge.set_theme("dark") is False, "no window yet"
+    assert bridge.set_backdrop("frost")["ok"] is False, "nothing to frost before the window is see-through"
     calls = []
     monkeypatch.setattr(glass, "set_dark_title_bar", lambda hwnd, dark: calls.append((hwnd, dark)) or True)
     bridge._hwnd = 9
@@ -81,8 +108,40 @@ def test_bridge_reports_and_never_raises(monkeypatch):
     assert calls == [(9, False), (9, True)]
     monkeypatch.setattr(glass, "set_dark_title_bar", lambda hwnd, dark: 1 / 0)
     assert bridge.set_theme("dark") is False
-    # Only the two methods are visible to the page.
-    assert sorted(name for name in dir(bridge) if not name.startswith("_")) == ["glass_state", "set_theme"]
+    # Only these are visible to the page.
+    assert sorted(name for name in dir(bridge) if not name.startswith("_")) == ["glass_state", "set_backdrop", "set_theme"]
+
+
+def test_bridge_backdrop_modes(monkeypatch):
+    frosted = []
+    monkeypatch.setattr(glass, "set_frost", lambda hwnd, on, theme: frosted.append((hwnd, on, theme)) or True)
+    monkeypatch.setattr(glass, "set_dark_title_bar", lambda hwnd, dark: True)
+    bridge = glass.Bridge()
+    bridge._hwnd, bridge._see_through = 9, True
+    assert bridge.set_backdrop("frost", "light") == {"ok": True, "frost": True, "frost_available": True, "problem": ""}
+    assert bridge.set_backdrop("clear", "light")["frost"] is False
+    assert bridge.set_backdrop("builtin", "dark")["frost"] is False, "the page covers the desktop itself"
+    assert frosted == [(9, True, "light"), (9, False, "light"), (9, False, "dark")]
+    # With frost on, a change of theme changes the tint under the glass as well as the title bar.
+    bridge.set_backdrop("frost", "dark")
+    bridge.set_theme("light")
+    assert frosted[-2:] == [(9, True, "dark"), (9, True, "light")]
+
+    # Windows refusing the effect is reported, once and for all, and clear glass still works.
+    monkeypatch.setattr(glass, "set_frost", lambda hwnd, on, theme: not on)
+    refused = glass.Bridge()
+    refused._hwnd, refused._see_through = 9, True
+    state = refused.set_backdrop("frost")
+    assert state["ok"] is True and state["frost"] is False and state["frost_available"] is False and "refused" in state["problem"]
+    assert refused.set_backdrop("clear")["frost_available"] is False
+
+    def explode(hwnd, on, theme):
+        raise OSError("no such function")
+
+    monkeypatch.setattr(glass, "set_frost", explode)
+    broken = glass.Bridge()
+    broken._hwnd, broken._see_through = 9, True
+    assert "OSError" in broken.set_backdrop("frost")["problem"]
 
 
 class FakeHandle:
@@ -101,9 +160,11 @@ def test_prepare_makes_every_layer_transparent(monkeypatch):
     seen = []
     monkeypatch.setattr(glass, "enable_see_through", lambda hwnd: seen.append(hwnd) or True)
     monkeypatch.setattr(glass, "set_dark_title_bar", lambda hwnd, dark: True)
+    monkeypatch.setattr(glass, "set_frost", lambda hwnd, on, theme: True)
     form, bridge = fake_form(), glass.Bridge()
     glass.prepare(form, bridge)
-    assert bridge.glass_state() == {"ok": True, "problem": ""} and bridge._hwnd == 31337 and seen == [31337]
+    assert bridge.glass_state() == {"ok": True, "frost": True, "frost_available": True, "problem": ""}
+    assert bridge._hwnd == 31337 and seen == [31337]
     # The window paints black (alpha 0 to the compositor) and the WebView paints nothing.
     assert (form.BackColor.R, form.BackColor.G, form.BackColor.B) == (0, 0, 0)
     assert form.browser.webview.DefaultBackgroundColor.A == 0
@@ -113,11 +174,25 @@ def test_prepare_makes_every_layer_transparent(monkeypatch):
 def test_prepare_that_fails_leaves_an_opaque_window_and_says_so(monkeypatch, capsys):
     pytest.importorskip("clr")
     monkeypatch.setattr(glass, "enable_see_through", lambda hwnd: False)
+    monkeypatch.setattr(glass, "set_frost", lambda hwnd, on, theme: pytest.fail("no frost without transparency"))
     bridge = glass.Bridge()
     glass.prepare(fake_form(), bridge)  # must not raise: the window still opens
     state = bridge.glass_state()
-    assert state["ok"] is False and "transparency" in state["problem"]
+    assert state["ok"] is False and state["frost"] is False and "transparency" in state["problem"]
     assert "staying opaque" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the glass window is Windows only")
+def test_prepare_without_frost_is_still_see_through(monkeypatch, capsys):
+    pytest.importorskip("clr")
+    monkeypatch.setattr(glass, "enable_see_through", lambda hwnd: True)
+    monkeypatch.setattr(glass, "set_dark_title_bar", lambda hwnd, dark: True)
+    monkeypatch.setattr(glass, "set_frost", lambda hwnd, on, theme: False)
+    bridge = glass.Bridge()
+    glass.prepare(fake_form(), bridge)
+    state = bridge.glass_state()
+    assert state["ok"] is True and state["frost"] is False and state["frost_available"] is False
+    assert "no frost" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the glass window is Windows only")
@@ -245,13 +320,22 @@ def test_show_edge_never_touches_the_glass_window(monkeypatch):
     assert launcher.show("http://127.0.0.1:5000", "edge") is True and process.waited
 
 
-def test_glass_styles_are_part_of_the_page():
+def test_the_page_is_liquid_glass_and_light_by_default():
     static = Path(glass.__file__).resolve().parent / "static"
-    assert 'href="css/glass.css"' in (static / "index.html").read_text(encoding="utf-8")
-    css = (static / "css" / "glass.css").read_text(encoding="utf-8")
-    # Every glass rule is behind the attribute, so the ordinary look cannot change.
-    body = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
-    selectors = [" ".join(chunk.split("{")[0].split()) for chunk in body.split("}") if "{" in chunk]
-    assert len(selectors) > 10
-    outside = [s for s in selectors if "[data-glass]" not in s and not s.startswith(".nav-glass")]
-    assert outside == [], outside
+    page = (static / "index.html").read_text(encoding="utf-8")
+    assert 'data-theme="light"' in page and 'data-backdrop="builtin"' in page
+    assert page.index("css/liquid.css") > page.index("css/board.css"), "the finish is laid over the components"
+    assert "js/views/settings.js" in page
+    tokens = (static / "css" / "tokens.css").read_text(encoding="utf-8")
+    light, dark = tokens.split(':root[data-theme="dark"]')
+    assert "color-scheme: light" in light and "color-scheme: dark" in dark
+    assert "--outline: #0b0b0b" in light, "black outlines"
+    liquid = (static / "css" / "liquid.css").read_text(encoding="utf-8")
+    # The desktop shows only when the page is told it can: otherwise the page paints its own backdrop.
+    assert "body { background: var(--backdrop)" in liquid
+    assert ':root[data-backdrop="frost"] body, :root[data-backdrop="clear"] body { background: var(--wash); }' in liquid
+    assert "backdrop-filter: var(--glass-blur)" in liquid
+    # No component stylesheet still draws a grey box outline: boxes are outlined in black.
+    for name in ("app.css", "board.css"):
+        css = (static / "css" / name).read_text(encoding="utf-8")
+        assert not re.search(r"border: 1px solid var\(--border(-strong)?\)", css), name

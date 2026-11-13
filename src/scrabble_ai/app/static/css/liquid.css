@@ -1,0 +1,162 @@
+/* Liquid glass: the finish laid over the components in app.css and board.css. Loaded last.
+ *
+ * Every pane is frosted, translucent glass with a bright rim, a faint sheen across its corner,
+ * generous corners and a black outline: the lead between panes of stained glass. Controls are
+ * pills. What is behind the glass depends on <html data-backdrop>:
+ *
+ *   builtin   the app's own soft, out-of-focus backdrop (the default in a browser window)
+ *   frost     the desktop, blurred by Windows behind the whole window (the app's own window)
+ *   clear     the desktop, unblurred
+ *
+ * Colours, the tint of the glass and the outline come from tokens.css; app.js sets the
+ * attributes and --tint from Settings.
+ */
+
+/* ---- What is behind the glass ----------------------------------------------------------- */
+
+html { background: var(--page); }
+body { background: var(--backdrop); background-attachment: fixed; }
+:root[data-backdrop="frost"], :root[data-backdrop="clear"] { background: transparent; }
+:root[data-backdrop="frost"] body, :root[data-backdrop="clear"] body { background: var(--wash); }
+
+/* ---- The shell: the sidebar and the top bar float as panes of their own ----------------- */
+
+#app { grid-template-columns: 216px 1fr; gap: 12px; padding: 12px; box-sizing: border-box; }
+#main { height: auto; min-height: 0; gap: 12px; }
+#sidebar { border-radius: var(--radius-l); padding: var(--space-4) var(--space-3) var(--space-3); border-right: 0; }
+#topbar { border-radius: var(--radius-l); border-bottom: 0; min-height: 52px; padding: var(--space-2) var(--space-4); }
+#view { padding: 2px 6px var(--space-5) 2px; scrollbar-gutter: stable; }
+.view.view-play, .view.view-watch { padding: 2px 6px var(--space-3) 2px; }
+
+.nav-item { border-radius: var(--radius-m); }
+.nav-item:hover { background: var(--surface-2); }
+.nav-item.active { background: var(--surface-2); box-shadow: 0 0 0 1px var(--outline), var(--rim); }
+.brand-tile { border: 1px solid var(--outline); border-radius: 9px; }
+
+/* ---- Panes ------------------------------------------------------------------------------ */
+
+#sidebar, #topbar, .card, .stat, .page-head, .run-toolbar, .play-action-row, .watch-bar, .tm-all,
+.notice, .ov-queue, .result-card, .blank-picker {
+  background-color: var(--surface-1);
+  background-image: var(--sheen);
+  border: var(--outline-width) solid var(--outline);
+  box-shadow: var(--rim), var(--pane-shadow);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+.card, .stat { border-radius: var(--radius-l); }
+.card .card, .card .stat, .card .notice, .card .tm-all { box-shadow: var(--rim); -webkit-backdrop-filter: none; backdrop-filter: none; }
+.notice { border-radius: var(--radius-m); background-color: var(--surface-2); }
+.result-card, .blank-picker { background-color: var(--surface-2); box-shadow: var(--rim), var(--shadow); }
+.notice-good { background-color: var(--good-wash); }
+.notice-warning { background-color: var(--warning-wash); }
+.notice-critical { background-color: var(--critical-wash); }
+
+/* Headings and toolbars that would otherwise float on the backdrop are panes too. */
+.page-head, .run-toolbar, .play-action-row, .watch-bar { border-radius: var(--radius-l); padding: var(--space-3) var(--space-4); }
+.page-head { align-items: center; }
+.page-head .lede { color: var(--text-secondary); }
+
+/* Text left straight on the backdrop keeps a halo of the page colour. */
+#view > h2, #view > h3, #view > section > h2, .dash-section-title, .report-headline { text-shadow: 0 0 10px var(--page), 0 0 4px var(--page); }
+
+/* ---- Controls: pills, each with its outline and rim ------------------------------------- */
+
+.button { border-radius: var(--radius-pill); box-shadow: var(--rim); }
+.button-primary, .button-danger { border-color: var(--outline); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35); }
+.button-ghost { border-color: transparent; box-shadow: none; }
+.button-ghost:hover { border-color: var(--outline); }
+
+.input, .select, .tm-num { border-radius: var(--radius-m); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06); }
+.input:hover, .select:hover { border-color: var(--outline); }
+.input:focus, .select:focus, .tm-num:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.input-changed { border-color: var(--accent); }
+
+.segmented { border-radius: var(--radius-pill); padding: 3px; }
+.segmented button { border-radius: var(--radius-pill); }
+.segmented button[aria-pressed="true"] { background: var(--solid); box-shadow: 0 0 0 1px var(--outline); }
+
+/* Tabs are a pill bar. */
+.tabs {
+  display: inline-flex; gap: 4px; padding: 4px; border: var(--outline-width) solid var(--outline);
+  border-radius: var(--radius-pill); background-color: var(--surface-1); background-image: var(--sheen);
+  box-shadow: var(--rim), var(--pane-shadow);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+}
+.tab { border: 0; margin: 0; padding: 7px var(--space-4); border-radius: var(--radius-pill); }
+.tab:hover { background: var(--surface-2); }
+.tab[aria-selected="true"] { background: var(--solid); box-shadow: 0 0 0 1px var(--outline); }
+
+.badge, .chip { border-radius: var(--radius-pill); }
+.chip { background-color: var(--surface-2); box-shadow: var(--rim); }
+a.chip:hover { border-color: var(--outline); background-color: var(--solid); }
+.chip-warning { background-color: var(--warning-wash); }
+.toggle input { border-radius: var(--radius-pill); }
+.progress { border: 1px solid var(--outline); height: 8px; border-radius: var(--radius-pill); }
+.log { border: 1px solid var(--outline); }
+.table tbody tr.clickable:hover { background: var(--surface-2); }
+
+/* ---- Things that float above the page: more tint, the same glass ------------------------ */
+
+.modal, .tm-menu, .toast, .chart-tooltip, :root[data-theme="light"] .chart-tooltip {
+  background-color: var(--surface-2);
+  background-image: var(--sheen);
+  border: var(--outline-width) solid var(--outline);
+  box-shadow: var(--rim), var(--shadow);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+.modal { border-radius: var(--radius-l); }
+.tm-menu, .toast, .chart-tooltip { border-radius: var(--radius-m); }
+.modal-backdrop { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+
+/* A few marks sit on top of a line and have to hide it. */
+.report-event-icon, .report-event:hover .report-event-icon, .ov-steps li::before { background: var(--solid); }
+.chart { --chart-surface: var(--solid); }
+.chart-table .table th, .score-table th, .cand-table th, .history th { background: var(--solid); }
+.tm-basket { background: transparent; border-left: 1px solid var(--border-strong); }
+
+/* ---- The board: solid, in a black frame -------------------------------------------------- */
+
+.board { border: var(--outline-width) solid var(--outline); box-shadow: var(--pane-shadow); }
+/* The result sits over the final position, which should stay readable behind it. */
+.board-overlay { background: color-mix(in srgb, var(--page) 20%, transparent); -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px); }
+
+/* ---- Scrollbars ------------------------------------------------------------------------- */
+
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border: 3px solid transparent; background-clip: padding-box; border-radius: var(--radius-pill); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); border: 3px solid transparent; background-clip: padding-box; }
+
+/* ---- Settings page ---------------------------------------------------------------------- */
+
+.set-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: var(--space-4); align-items: start; }
+@media (max-width: 1100px) { .set-grid { grid-template-columns: 1fr; } }
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--border); }
+.set-row:first-of-type { border-top: 0; padding-top: 0; }
+.set-row-text { min-width: 0; }
+.set-row-title { font-weight: 600; }
+.set-row-help { color: var(--text-secondary); font-size: var(--text-s); margin-top: 2px; max-width: 52ch; }
+.set-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+@media (max-width: 760px) { .set-options { grid-template-columns: 1fr; } }
+.set-option {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: var(--space-3);
+  border: 1px solid var(--outline); border-radius: var(--radius-m); background: var(--surface-2); box-shadow: var(--rim);
+  color: var(--text-primary); font: inherit; text-align: left; cursor: pointer;
+}
+.set-option:hover:not(:disabled) { background: var(--solid); }
+.set-option[aria-pressed="true"] { background: var(--solid); box-shadow: 0 0 0 2px var(--accent), var(--rim); }
+.set-option:disabled { opacity: 0.5; cursor: not-allowed; }
+.set-option-title { font-weight: 650; }
+.set-option-help { color: var(--text-secondary); font-size: var(--text-s); line-height: 1.4; }
+.set-swatch { width: 100%; height: 46px; border-radius: 9px; border: 1px solid var(--outline); margin-bottom: 4px; overflow: hidden; position: relative; }
+.set-swatch::after { content: ""; position: absolute; inset: 9px 22% 9px 9px; border-radius: 7px; border: 1px solid var(--outline); background: rgba(255, 255, 255, 0.62); box-shadow: var(--rim); }
+:root[data-theme="dark"] .set-swatch::after { background: rgba(24, 27, 34, 0.62); }
+.set-swatch-frost { background: linear-gradient(120deg, #9db7e8, #e7c3ae 55%, #a8d9c9); filter: saturate(0.9); }
+.set-swatch-clear { background: repeating-linear-gradient(90deg, #7f8fb1 0 9px, #f2f4f8 9px 18px, #d58a6a 18px 27px); }
+.set-swatch-builtin { background: var(--backdrop); }
+.set-range { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto 38px; align-items: center; gap: var(--space-3); min-width: 300px; color: var(--text-secondary); font-size: var(--text-s); }
+.set-range .num { text-align: right; color: var(--text-primary); }
+.set-range input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.set-note { margin-top: var(--space-3); color: var(--text-secondary); font-size: var(--text-s); }

@@ -292,72 +292,86 @@ window.App = (function () {
     nav.appendChild(h("a", { class: "brand", href: "#/overview" },
       h("span", { class: "brand-tile" }, "S"), h("span", { class: "brand-name" }, "Scrabble Lab")));
     const items = Object.values(views).filter((v) => v.nav).sort((a, b) => a.order - b.order);
-    for (const view of items) {
+    // Views marked `foot` (Settings) sit at the bottom of the sidebar.
+    let spaced = false;
+    for (const view of [...items.filter((v) => !v.foot), ...items.filter((v) => v.foot)]) {
+      if (view.foot && !spaced) { nav.appendChild(h("div", { class: "nav-spacer" })); spaced = true; }
       // A view that owns sub-pages (run detail under Training) lists them in `covers`.
       const isActive = view.name === active || (view.covers || []).includes(active);
       nav.appendChild(h("a", { class: "nav-item" + (isActive ? " active" : ""), href: "#/" + view.name,
         "aria-current": isActive ? "page" : null },
         h("span", { class: "nav-icon", html: view.icon || "" }), h("span", null, view.title)));
     }
-    nav.appendChild(h("div", { class: "nav-spacer" }));
-    if (glass.on) nav.appendChild(glassControl());
-    nav.appendChild(h("button", { class: "nav-item nav-theme", type: "button", onclick: toggleTheme,
-      title: "Switch between dark and light" },
-      h("span", { class: "nav-icon", html: ICON_THEME }), h("span", null, "Theme")));
   }
 
-  const ICON_THEME = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" ' +
-    'stroke-width="1.6"><circle cx="10" cy="10" r="4"/><path d="M10 1.5v2.5M10 16v2.5M1.5 10H4M16 10h2.5' +
-    'M4 4l1.8 1.8M14.2 14.2L16 16M4 16l1.8-1.8M14.2 5.8L16 4"/></svg>';
+  // ---- Appearance -----------------------------------------------------------------------
+  // The theme (light by default), how milky the glass is, and what is behind it. In the app's
+  // own window (scrabble_ai/app/window.py; the address carries ?glass=1) the desktop can show
+  // through, frosted by Windows or clear; anywhere else the page draws its own backdrop.
 
-  function toggleTheme() {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    try { localStorage.setItem("theme", next); } catch (error) { /* private mode */ }
-    tellWindow("set_theme", next);
-    emit("theme", next);
-    render();
+  const appearance = {
+    native: false,      // in the app's own window
+    seeThrough: null,   // what that window reported: true, false, or null before it has answered
+    frost: null,        // whether Windows accepted the frosted effect
+    problem: "",
+    theme: "light",
+    backdrop: "frost",  // the choice: "frost", "clear" or "builtin"
+    tint: 50,           // 0 (clearest) to 100 (milkiest)
+  };
+
+  function stored(key) {
+    try { return localStorage.getItem(key); } catch (error) { return null; }
+  }
+  function store(key, value) {
+    try { localStorage.setItem(key, String(value)); } catch (error) { /* private mode */ }
   }
 
-  // ---- Glass ----------------------------------------------------------------------------
-  // In its native window (scrabble_ai/app/window.py) the app is see-through: the address carries
-  // ?glass=1, the window's own background is transparent, and css/glass.css makes the page
-  // nearly clear and the panels translucent. `amount` is 0 (solid) to 100 (clearest).
-
-  const glass = { on: false, amount: 60 };
-
-  function setGlassAmount(amount) {
-    glass.amount = Math.max(0, Math.min(100, Math.round(amount)));
-    document.documentElement.style.setProperty("--glass", String(glass.amount / 100));
-    try { localStorage.setItem("glass", String(glass.amount)); } catch (error) { /* private mode */ }
+  /** The backdrop actually in use: the choice, unless this window cannot do it. */
+  function backdropInUse() {
+    if (!appearance.native || appearance.seeThrough === false) return "builtin";
+    if (appearance.backdrop === "frost" && appearance.frost === false) return "builtin";
+    return appearance.backdrop;
   }
 
-  function enableGlass() {
-    glass.on = true;
-    document.documentElement.dataset.glass = "on";
-    let saved = NaN;
-    try { saved = Number(localStorage.getItem("glass") ?? NaN); } catch (error) { /* private mode */ }
-    setGlassAmount(Number.isFinite(saved) ? saved : 60);
+  function applyAppearance() {
+    const root = document.documentElement;
+    root.dataset.theme = appearance.theme;
+    root.dataset.backdrop = backdropInUse();
+    // Sharp things behind the glass compete with what is on it, so clear glass is tinted a step more.
+    const tint = backdropInUse() === "clear" ? Math.min(100, appearance.tint + 25) : appearance.tint;
+    root.style.setProperty("--tint", String(tint / 100));
   }
 
-  /** The window turned out not to be see-through: go back to the solid look. */
-  function disableGlass() {
-    glass.on = false;
-    delete document.documentElement.dataset.glass;
-    document.documentElement.style.removeProperty("--glass");
-    render();
+  function loadAppearance() {
+    appearance.native = new URLSearchParams(location.search).get("glass") === "1";
+    const theme = stored("theme");
+    if (theme === "light" || theme === "dark") appearance.theme = theme;
+    const backdrop = stored("backdrop");
+    if (backdrop === "frost" || backdrop === "clear" || backdrop === "builtin") appearance.backdrop = backdrop;
+    const tint = Number(stored("tint") ?? NaN);
+    if (Number.isFinite(tint)) appearance.tint = Math.max(0, Math.min(100, Math.round(tint)));
+    applyAppearance();
   }
 
-  function glassControl() {
-    const value = h("span", { class: "nav-glass-value" }, glass.amount ? glass.amount + "%" : "solid");
-    const range = h("input", { type: "range", min: "0", max: "100", step: "5", value: String(glass.amount),
-      id: "glass-range", "aria-label": "How see-through the window is",
-      oninput: () => {
-        setGlassAmount(Number(range.value));
-        value.textContent = glass.amount ? glass.amount + "%" : "solid";
-      } });
-    return h("div", { class: "nav-glass", title: "How much of the desktop shows through the window" },
-      h("label", { class: "nav-glass-head", for: "glass-range" }, h("span", null, "See-through"), value), range);
+  function setTheme(theme) {
+    appearance.theme = theme === "dark" ? "dark" : "light";
+    store("theme", appearance.theme);
+    applyAppearance();
+    tellWindow("set_theme", appearance.theme);
+    emit("theme", appearance.theme);
+    render();  // charts read their colours when they are drawn
+  }
+
+  function setBackdrop(mode) {
+    appearance.backdrop = mode === "clear" || mode === "builtin" ? mode : "frost";
+    store("backdrop", appearance.backdrop);
+    syncWindow();
+  }
+
+  function setTint(tint) {
+    appearance.tint = Math.max(0, Math.min(100, Math.round(tint)));
+    store("tint", appearance.tint);
+    applyAppearance();
   }
 
   /** Call a method of the native window, if there is one (see Bridge in window.py). */
@@ -367,9 +381,21 @@ window.App = (function () {
     try { return Promise.resolve(api[method](...args)).catch(() => null); } catch (error) { return Promise.resolve(null); }
   }
 
+  /** Tell the window which backdrop is wanted and take note of what it could do. */
+  async function syncWindow() {
+    const answer = await tellWindow("set_backdrop", appearance.backdrop, appearance.theme);
+    if (answer) {
+      appearance.seeThrough = answer.ok !== false;
+      appearance.frost = answer.frost_available !== false;
+      appearance.problem = answer.problem || "";
+    }
+    applyAppearance();
+    emit("appearance", appearance);
+  }
+
   function connectWindow() {
-    tellWindow("set_theme", document.documentElement.dataset.theme);
-    tellWindow("glass_state").then((answer) => { if (answer && answer.ok === false && glass.on) disableGlass(); });
+    tellWindow("set_theme", appearance.theme);
+    syncWindow();
   }
 
   function renderTopbar() {
@@ -499,11 +525,7 @@ window.App = (function () {
   }
 
   async function start() {
-    try {
-      const saved = localStorage.getItem("theme");
-      if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
-    } catch (error) { /* private mode */ }
-    if (new URLSearchParams(location.search).get("glass") === "1") enableGlass();
+    loadAppearance();
     // The native window announces itself once its bridge is ready.
     if (window.pywebview && window.pywebview.api) connectWindow();
     else window.addEventListener("pywebviewready", connectWindow, { once: true });
@@ -524,6 +546,8 @@ window.App = (function () {
     get status() { return state.status; },
     get route() { return state.route; },
     get theme() { return document.documentElement.dataset.theme; },
-    get glass() { return glass.on ? glass.amount : null; },
+    /** Theme, tint and backdrop: the choices, and `backdropInUse` for what this window can do. */
+    get appearance() { return Object.assign({ backdropInUse: backdropInUse() }, appearance); },
+    setTheme, setBackdrop, setTint,
   };
 })();
