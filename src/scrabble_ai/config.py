@@ -65,24 +65,26 @@ class WarmStartConfig:
     games: int = 100_000  # games played by the static evaluator before any network self-play (0 = skip)
     temperature: float = 6.0  # softmax temperature over static values, so bad moves are seen too
     max_candidates: int = 16
-    steps: int = 3_000  # training steps on that data before self-play starts
+    steps: int = 2_000  # training steps on that data before self-play starts (under one pass over it)
 
 
 @dataclass
 class TrainConfig:
-    batch_size: int = 2048
-    learning_rate: float = 1e-3
+    batch_size: int = 1024
+    learning_rate: float = 3e-4
     warmup_steps: int = 500  # linear learning-rate warm-up
     weight_decay: float = 1e-4
     grad_clip: float = 1.0  # max gradient norm (0 = off)
     value_scale: float = 50.0  # points per unit of the value output
     huber_delta: float = 2.0  # Huber loss transition, in value-output units
     win_loss_weight: float = 0.5  # weight of the win-probability loss
-    td_lambda: float = 1.0  # 1 = Monte Carlo targets; below 1 mixes in the network's own later estimates
+    td_lambda: float = 0.7  # 1 = Monte Carlo targets; below 1 mixes in the network's own later estimates
     replay_capacity: int = 3_000_000  # positions kept (about 310 bytes each)
     min_replay: int = 100_000  # positions needed before training starts
-    replay_ratio: float = 4.0  # training samples drawn per new self-play position
-    actor_sync_steps: int = 250  # training steps between copies of the weights into the self-play network
+    replay_ratio: float = 1.0  # training samples drawn per new self-play position
+    actor_sync_steps: int = 100  # training steps between copies of the weights into the self-play network
+    guard: bool = True  # go back to the best network and halve the learning rate when training makes it worse
+    guard_patience: int = 2  # evaluations in a row significantly behind the best before the guard acts
     augment_transpose: bool = True  # randomly swap rows and columns (the only exact board symmetry)
     amp: bool = True  # bf16 autocast
     checkpoint_minutes: float = 10.0
@@ -143,6 +145,7 @@ class Config:
             (self.train.checkpoint_minutes > 0, "train.checkpoint_minutes must be positive"),
             (self.train.eval_minutes > 0, "train.eval_minutes must be positive"),
             (self.train.keep_checkpoints >= 1, "train.keep_checkpoints must be at least 1"),
+            (self.train.guard_patience >= 1, "train.guard_patience must be at least 1"),
         ]
         for ok, message in checks:
             if not ok:

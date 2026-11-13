@@ -81,7 +81,11 @@ Everything the "new run" form needs.
 - `step` is how far the arrow keys move a number, not a rule. `multiple_of` is a rule (8 for
   `model.channels`, `null` elsewhere).
 - `unit` is what a number counts (`hours`, `games`, `points`, `steps`, `positions`, `minutes`,
-  `pairs`) or `null`; show it beside the input.
+  `pairs`, `evaluations`) or `null`; show it beside the input.
+- Every field also has `"effects": {"lower": "...", "higher": "...", "typical": "..."}`: what
+  turning the setting down does, what turning it up does (for an on/off setting, `lower` is off
+  and `higher` is on; for a choice, each describes one option), and the range worth trying. All
+  three are sentences for the user; `typical` may be an empty string.
 - `advanced` fields belong behind a "Show all settings" toggle.
 - `speed` rows are benchmark figures for this machine. `measured: false` means worked out from
   separate measurements, so label those "estimated". For a size not in the list, interpolate
@@ -121,7 +125,11 @@ the app window is closed, and the app finds them again when it opens.
   "has_best": true,
   "checkpoints": 3,
   "changed": {"model.blocks": 10, "model.channels": 128},
-  "error": null
+  "error": null,
+  "trend": {"games": [23228, 46612], "spread": [-7.7, -8.5], "ci": [6.9, 7.8]},
+  "best_eval": {"games": 23228, "step": 4085, "spread": -7.7, "ci": 6.9},
+  "health": {"state": "worse", "edge": -5.0,
+             "note": "It got worse as it trained: its best network is the first one evaluated."}
 }
 ```
 
@@ -133,6 +141,17 @@ the app window is closed, and the app finds them again when it opens.
   finished, `null` if it has no limit or is queued, stopped or failed.
 - `latest_eval` is `null` before the first evaluation. `ci` is the half-width of the 95% interval.
 - `changed`: settings that differ from the defaults.
+- `trend`: every evaluation against greedy-leave, oldest first, as parallel arrays (for a small
+  chart beside the run). Empty arrays before the first evaluation.
+- `best_eval`: the evaluation against greedy-leave with the highest spread, or `null`.
+- `health`: the one-line verdict on how training went, or `null` before the first evaluation.
+  `state` is `ahead` (the latest evaluation is significantly above greedy-leave), `level`
+  (its interval includes zero), `behind` (significantly below), or `worse` (significantly
+  below the run's own best evaluation: training made it worse). `edge` is the average, over
+  the last ten self-play reports, of leave-only error minus the network's error on unseen games,
+  in points of RMSE (`null` if there are none); below zero the network predicts unseen games
+  worse than leave values alone, which is what a network memorising its training games does.
+  `note` is a sentence for the user.
 
 ### `GET /api/runs`
 
@@ -188,12 +207,13 @@ train.batch_size`), and when several runs were posted it starts with the run's n
 | kind | Extra fields |
 |---|---|
 | `warmstart` | `games_played`, `positions_added`, `seconds`, `mean_score` |
-| `train` | `loss`, `value_loss`, `win_loss`, `value_error_points`, `learning_rate` |
+| `train` | `loss`, `value_loss`, `win_loss`, `value_error_points` (mean absolute error on the training batches, in points), `value_rmse_points` (the same as RMSE; only in runs made after 2026-11-13), `learning_rate` |
 | `selfplay` | `games_per_second`, `positions_per_second`, `mean_score`, `mean_turns`, `mean_abs_spread`, `first_player_win_rate`, `temperature`, `value_rmse_points`, `leave_only_rmse_points`, `win_brier`, `replay_positions`, `replay_gb`, `bingos_per_game`, `exchanges_per_game`, `passes_per_game`, `max_game_score`, `max_play_score` |
 | `eval` | `opponent` (`greedy-leave` or `greedy`), `spread`, `spread_ci`, `win_rate`, `win_ci`, `score_for`, `score_against`, `pairs` |
 | `gate` | `spread`, `spread_ci`, `win_rate`, `best_step`, `promoted` (bool), `pairs` |
 | `checkpoint` | `file`, `replay_positions` |
 | `session` | `event`: `start` (with `parameters`, `limit_hours`, `limit_games`), `selfplay` (the network starts playing itself) or `stop` (with `reason` and `finished`) |
+| `guard` | `action` (`rollback`), `to_step` (the best network's step, whose weights were restored), `learning_rate_scale` (what the learning rate is now multiplied by), `reason` |
 
 `train` and `selfplay` arrive about once a minute, `eval` and `gate` every `train.eval_minutes`.
 `value_rmse_points` against `leave_only_rmse_points` is the honest progress signal between
@@ -209,6 +229,17 @@ should fall below the leave-only figure.
 Ask the run to stop cleanly (it finishes its step, evaluates, saves). `{"ok": true}`. With body
 `{"force": true}` the process is killed instead; anything since the last checkpoint is lost.
 For a queued run this takes it out of the queue (its status becomes `stopped`; resume starts it).
+
+### `POST /api/runs/<name>/rename`
+
+Body `{"name": "sixty-four-run-1"}`. Renames the run, and with it every model of the run (models
+are named after their run). Returns the run summary under its new name. The run's folder is
+renamed, its saved settings, stars and notes follow, and matches already played show the new
+name and can still be replayed; games in progress against one of its models carry on under the
+new name. The checkpoint files are not rewritten (the app resumes a run by its folder's name).
+400 while the run is running, stopping or queued, while a match using one of its models is
+still running, for a name that is not allowed or already in use (compared without regard to
+case), or the same name (a change of case alone is allowed); 404 for a run that does not exist.
 
 ### `POST /api/runs/<name>/resume`
 
@@ -262,6 +293,9 @@ Analysis of a run so far, for the post-training page (and usable mid-run).
 - `promotions` counts gate matches won. The first evaluated network becomes the best without a
   match and is reported as its own event ("First network to beat"), not counted.
 - A run whose process died gets a last `stop` event with tone `warning`, "Run ended unexpectedly".
+- More event kinds: `overfit` (the network began predicting unseen games worse than leave values
+  alone) and `guard` (the trainer went back to its best network and lowered the learning rate).
+- `summary.health` is the same object as the run summary's `health`.
 
 ## Model library
 

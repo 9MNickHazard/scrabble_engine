@@ -289,3 +289,131 @@ def test_resuming_an_interrupted_warm_start_finishes_it_without_replaying_seeds(
     assert resumed.step >= 20, "and the pretraining steps were taken"
     assert resumed.warm_next_seed > seed_before, "with fresh seeds, not the interrupted ones again"
     assert resumed.games >= 8, "then self-play ran"
+
+
+# ---- the guard ---------------------------------------------------------------------------------
+
+
+def stub_matches(monkeypatch, gate_spread: float, gate_ci: float = 5.0):
+    """Evaluation matches with made-up results: level against the baselines, `gate_spread` against
+    the best network."""
+    def play_match(engine, leaves, a, b, seeds, *args):
+        against_best = not isinstance(b, str)
+        return train_module.MatchResult(a.name, getattr(b, "name", b), len(seeds), gate_spread if against_best else 0.0,
+                                        gate_ci, 0.3 if against_best else 0.5, 0.05, 400.0, 400.0, 24.0)
+    monkeypatch.setattr(train_module, "play_match", play_match)
+
+
+def weights(net) -> dict:
+    return {key: value.clone() for key, value in net.state_dict().items()}
+
+
+def same(net, saved: dict) -> bool:
+    state = net.state_dict()
+    return all(torch.equal(state[key], saved[key]) for key in saved)
+
+
+def drift(net) -> None:
+    """Stand in for training that has moved the weights."""
+    with torch.no_grad():
+        for parameter in net.parameters():
+            parameter.add_(0.25)
+
+
+def test_the_guard_goes_back_to_the_best_network_and_halves_the_learning_rate(env, monkeypatch):
+    config = load_config(None, settings(env, "guard", warmstart__games=0, train__guard_patience=2))
+    trainer = Trainer(config, quiet=True)
+    stub_matches(monkeypatch, -30.0)
+    trainer.evaluate()  # the first evaluated network becomes the best
+    assert trainer.best_net is not None and (trainer.lr_scale, trainer.worse_streak, trainer.rollbacks) == (1.0, 0, 0)
+    best = weights(trainer.best_net)
+    trainer.step = 100  # past the learning-rate warm-up
+    full_rate = trainer.learning_rate()
+    assert full_rate == pytest.approx(config.train.learning_rate)
+
+    drift(trainer.net)
+    old_optimizer = trainer.optimizer
+    trainer.evaluate()
+    assert (trainer.worse_streak, trainer.rollbacks, trainer.lr_scale) == (1, 0, 1.0), "one bad evaluation is not enough"
+    assert not same(trainer.net, best) and trainer.optimizer is old_optimizer
+
+    trainer.losses.append((1.0, 1.0, 1.0, 1.0, 1.0))
+    trainer.evaluate()
+    assert (trainer.worse_streak, trainer.rollbacks, trainer.lr_scale) == (0, 1, 0.5)
+    assert same(trainer.net, best) and same(trainer.actor_net, best) and same(trainer.best_net, best)
+    assert trainer.optimizer is not old_optimizer, "the optimizer starts afresh"
+    assert trainer.optimizer.param_groups[0]["params"][0] is next(p for p in trainer.net.parameters() if p.ndim > 1)
+    assert trainer.losses == [], "losses from the abandoned weights are not reported"
+    assert trainer.learning_rate() == pytest.approx(full_rate / 2)
+
+    [guard] = [r for r in metrics(env.root / "guard") if r["kind"] == "guard"]
+    assert guard["action"] == "rollback" and guard["to_step"] == trainer.best_step == 0
+    assert guard["learning_rate_scale"] == 0.5 and guard["step"] == 100
+    assert guard["reason"] == "2 evaluations in a row significantly behind best@0 (latest -30.0 +/- 5.0)"
+
+    # The state survives a checkpoint, so a resumed run keeps its lowered learning rate.
+    trainer.worse_streak = 1
+    path = trainer.save()
+    resumed = Trainer(load_checkpoint_config(path), resume=path, quiet=True)
+    assert (resumed.lr_scale, resumed.worse_streak, resumed.rollbacks) == (0.5, 1, 1)
+    assert resumed.learning_rate() == pytest.approx(full_rate / 2)
+
+
+def test_the_guard_counts_only_evaluations_in_a_row_that_are_significantly_behind(env, monkeypatch):
+    config = load_config(None, settings(env, "guard-streak", warmstart__games=0, train__guard_patience=2))
+    trainer = Trainer(config, quiet=True)
+    stub_matches(monkeypatch, -30.0)
+    trainer.evaluate()
+    best = weights(trainer.best_net)
+    drift(trainer.net)
+    trainer.evaluate()
+    assert trainer.worse_streak == 1
+    stub_matches(monkeypatch, -3.0)  # behind, but the interval includes zero
+    trainer.evaluate()
+    assert trainer.worse_streak == 0 and trainer.rollbacks == 0
+    stub_matches(monkeypatch, -30.0)
+    trainer.evaluate()
+    assert trainer.worse_streak == 1 and trainer.rollbacks == 0 and not same(trainer.net, best)
+    stub_matches(monkeypatch, 30.0)  # a significant win: promoted, and the streak ends
+    trainer.evaluate()
+    assert trainer.worse_streak == 0 and trainer.rollbacks == 0 and not same(trainer.best_net, best)
+
+
+def test_the_guard_can_be_turned_off_and_its_scale_has_a_floor(env, monkeypatch):
+    config = load_config(None, settings(env, "guard-off", warmstart__games=0, train__guard="false",
+                                        train__guard_patience=1))
+    trainer = Trainer(config, quiet=True)
+    stub_matches(monkeypatch, -30.0)
+    trainer.evaluate()
+    best = weights(trainer.best_net)
+    drift(trainer.net)
+    for _ in range(3):
+        trainer.evaluate()
+    assert trainer.rollbacks == 0 and trainer.worse_streak == 3 and not same(trainer.net, best)
+    assert not any(r["kind"] == "guard" for r in metrics(env.root / "guard-off"))
+
+    trainer.config.train.guard = True
+    for _ in range(9):
+        drift(trainer.net)
+        trainer.evaluate()
+    assert trainer.rollbacks == 9 and trainer.lr_scale == 1 / 64, "halved six times, then held"
+
+
+def test_a_checkpoint_from_before_the_guard_resumes_with_its_defaults(env):
+    config = load_config(None, settings(env, "guard-old", warmstart__games=0))
+    trainer = Trainer(config, quiet=True)
+    trainer.lr_scale, trainer.rollbacks = 0.25, 2
+    path = trainer.save()
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    for key in ("lr_scale", "worse_streak", "rollbacks"):
+        del state[key]
+    torch.save(state, path)
+    resumed = Trainer(load_checkpoint_config(path), resume=path, quiet=True)
+    assert (resumed.lr_scale, resumed.worse_streak, resumed.rollbacks) == (1.0, 0, 0)
+
+
+def test_training_reports_its_error_on_the_positions_it_trained_on(fresh):
+    reports = [r for r in metrics(fresh.run_dir) if r["kind"] == "train"]
+    assert reports
+    for report in reports:
+        assert report["value_rmse_points"] >= report["value_error_points"] > 0, "RMSE is never below the mean absolute error"

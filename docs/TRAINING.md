@@ -34,9 +34,9 @@ uv run scrabble-ai train --config configs/train.toml --name night1 --hours 8
 
 A fresh run does three things in order:
 
-1. **Warm start** (about 3 minutes): the static evaluator plays 100,000 games, with some
-   randomness, to fill the replay buffer.
-2. **Pretraining** (about 2 minutes): 3,000 training steps on those games.
+1. **Warm start** (about two and a half minutes): the static evaluator plays 100,000 games, with
+   some randomness, to fill the replay buffer.
+2. **Pretraining** (about a minute): 2,000 training steps on those games.
 3. **Self-play**: the network plays itself and trains on the results until the limit.
 
 It ends with an evaluation against the baseline bots and a final checkpoint.
@@ -59,6 +59,15 @@ games 14,037 (59.2/s), step 1,252, temp 3.84, score 415, value RMSE 73.7 vs leav
   in that dry run, the network has not been shown to beat the baseline.
 - **gate lines**: the current network against the best one so far. `best.pt` is replaced only
   when the current network wins with an interval that excludes zero.
+- **guard lines**: `guard: back to the best network (step 6,509), learning rate now 1.50e-04`
+  means the network was significantly behind the best one at two evaluations in a row, so the
+  trainer went back to the best network's weights and halved the learning rate. Once is no cause
+  for alarm. Again and again means the settings make the network worse: see
+  [TUNING.md](TUNING.md).
+
+**If the value RMSE goes above leave-only and stays there, the run is memorising its own games,
+and the evaluation will fall.** Both of the first real runs did this ([PLAN.md](PLAN.md)). The
+app's run page says so in words and draws the two errors side by side.
 
 For curves:
 
@@ -121,16 +130,18 @@ values in that file are the defaults. Three ways to change one, later ones winni
 A misspelled section or key stops the run with an error naming the valid ones. The settings in
 force are saved to `runs/<name>/config.toml` at the start of every session.
 
-The settings that matter most:
+[TUNING.md](TUNING.md) has every setting, what lowering and raising it does, and what to try for
+each kind of trouble. The settings that matter most:
 
 | Setting | Default | What it does | When to change it |
 |---|---|---|---|
 | `model.blocks`, `model.channels` | 6, 64 | Size of the network | A bigger network (10 x 128) is about 3 times slower per game. Try it once the small one has clearly learned something. Cannot be changed when resuming. |
 | `selfplay.max_candidates` | 64 | Moves per decision the network evaluates | 32 is about 30% faster. Lower it only if evaluation shows no loss of strength. |
 | `selfplay.temperature_start`, `temperature_end`, `temperature_decay_games` | 4.0, 0.5, 300,000 | How much self-play explores, in points, and how fast that falls | Raise the end value if training stalls from too little variety; lower it if late-run games look random. |
-| `train.learning_rate` | 1e-3 | Step size | Lower it (3e-4) if the loss jumps around or goes up; this is the first thing to try when a run is unstable. |
-| `train.replay_ratio` | 4.0 | Training samples per new position | Higher learns more from each game and slows self-play. |
-| `train.td_lambda` | 1.0 | 1 trains on actual game outcomes; lower mixes in the network's own estimates | Try 0.8 to 0.9 after a first run works, to cut the noise in the targets. |
+| `train.learning_rate` | 3e-4 | Step size | Lower it (1e-4) if a run keeps getting worse; raise it towards 1e-3 only if a run is stable and learning slowly. |
+| `train.replay_ratio` | 1.0 | Training samples per new position: about how often each position is trained on | Leave it at 1 or below. At 4 the first runs memorised their games. |
+| `train.td_lambda` | 0.7 | 1 trains on actual game results; lower leans on the estimate of the next position | 0.5 if a run still memorises; towards 0.9 if its estimates drift. |
+| `train.guard`, `guard_patience` | true, 2 | Go back to the best network and halve the learning rate after this many evaluations in a row significantly behind it | Turn it off only to see what a setting does unprotected. |
 | `train.replay_capacity` | 3,000,000 | Positions kept in RAM (0.9 GB) | Raise it to train on a longer history; 10,000,000 is about 3 GB. |
 | `selfplay.win_weight` | 0.0 | 0 picks moves by expected spread, 1 by win probability | Leave at 0 while training. Use it at evaluation time to see how win-seeking play does. |
 | `model.cross_checks` | true | Whether the network sees which letters fit on each empty square | Turn off only as an experiment to measure what it is worth. Cannot be changed when resuming. |
@@ -142,9 +153,10 @@ The settings that matter most:
 Measured on this PC (RTX 5070 Ti, Ryzen 7 7800X3D) with the default 6 x 64 network; see
 [BENCHMARKS.md](BENCHMARKS.md).
 
-- Self-play and training together ran at 58 games per second in a five-minute dry run. If that
-  holds, an hour is about 210,000 games and 5 million new positions, and 8 hours is about 1.7
-  million games. That is an extrapolation; the run's own log is the real figure.
+- The first full run (2.19 hours, with the old replay ratio of 4) played 450,005 games: 57 a
+  second overall, about 205,000 games and 5 million new positions an hour. The 10 x 128 network
+  managed 18 a second (441,805 games in 6.67 hours). The current replay ratio of 1 does a quarter
+  of the training per game, so self-play should be somewhat faster; that has not been measured.
 - GPU memory: under 2 GB. RAM: about 1 GB for the replay buffer.
 - Disk: up to 0.9 GB for the replay buffer plus about 20 MB per checkpoint (5 are kept).
 

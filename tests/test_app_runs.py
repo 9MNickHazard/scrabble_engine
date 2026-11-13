@@ -246,14 +246,14 @@ def test_games_per_second(manager, dirs):
 
 def test_changed_lists_only_real_differences(manager, dirs):
     runs_dir, _ = dirs
-    make_run(runs_dir, "r", settings={"model.blocks": 10, "model.channels": 128, "train.learning_rate": 0.0003,
+    make_run(runs_dir, "r", settings={"model.blocks": 10, "model.channels": 128, "train.learning_rate": 0.0005,
                                       "train.amp": False, "run.hours": 8.0, "run.max_games": 5000,
                                       "run.name": "elsewhere", "run.out_dir": "C:/somewhere", "run.vram_fraction": 0.9})
-    assert manager.summary("r")["changed"] == {"model.blocks": 10, "model.channels": 128, "train.learning_rate": 0.0003,
+    assert manager.summary("r")["changed"] == {"model.blocks": 10, "model.channels": 128, "train.learning_rate": 0.0005,
                                                "train.amp": False}
     # An int written for a float setting is the same value, not a change.
     run_dir = make_run(runs_dir, "ints")
-    (run_dir / "config.toml").write_text("[train]\ncheckpoint_minutes = 10\nlearning_rate = 0.001\n[run]\nhours = 3\n",
+    (run_dir / "config.toml").write_text("[train]\ncheckpoint_minutes = 10\nreplay_ratio = 1\n[run]\nhours = 3\n",
                                          encoding="utf-8")
     assert manager.summary("ints")["changed"] == {}
 
@@ -276,7 +276,11 @@ def test_summary_of_the_genuine_run(manager, dirs, trained):
     summary = manager.summary(TINY_RUN)
     assert set(summary) == {"name", "status", "phase", "network", "parameters", "games", "step", "positions", "hours",
                             "games_per_second", "created", "updated", "limit", "progress", "latest_eval", "best_step",
-                            "has_best", "checkpoints", "changed", "error"}
+                            "has_best", "checkpoints", "changed", "error", "trend", "best_eval", "health"}
+    # The tiny run's one evaluation, of two pairs: a trend of one point and a verdict on it.
+    assert len(summary["trend"]["games"]) == len(summary["trend"]["spread"]) == len(summary["trend"]["ci"]) == 1
+    assert summary["best_eval"]["step"] == trained.best_step and summary["best_eval"]["spread"] == summary["trend"]["spread"][0]
+    assert summary["health"]["state"] in ("ahead", "level", "behind") and summary["health"]["note"]
     assert summary["status"] == "finished" and summary["error"] is None
     assert summary["phase"] == "selfplay" and summary["progress"] == 1.0
     assert summary["network"] == "1x16" and summary["parameters"] > 0
@@ -1290,3 +1294,33 @@ def test_phase_of_a_run_stopped_during_its_warm_start(manager, dirs):
                                      record("session", NOW - 50, event="stop", reason="STOP file found", finished=False)])
     summary = manager.summary("r")
     assert (summary["status"], summary["phase"]) == ("stopped", "warmstart")
+
+
+def test_summary_says_how_training_went(manager, dirs):
+    runs_dir, _ = dirs
+    make_run(runs_dir, "empty")
+    summary = manager.summary("empty")
+    assert summary["trend"] == {"games": [], "spread": [], "ci": []}
+    assert summary["best_eval"] is None and summary["health"] is None
+
+    def evaluation(games, spread, ci, opponent="greedy-leave"):
+        return record("eval", games, games=games, step=games // 10, opponent=opponent, spread=spread, spread_ci=ci,
+                      win_rate=0.5, pairs=250)
+
+    records = [record("session", 0, event="start")]
+    for games, spread in ((1000, -3.0), (2000, -40.0), (3000, -45.0)):
+        records += [record("selfplay", games, games=games, value_rmse_points=78.0, leave_only_rmse_points=74.0),
+                    evaluation(games, spread, 7.0), evaluation(games, spread + 40.0, 9.0, "greedy")]
+    run_dir = make_run(runs_dir, "worse", records=records)
+    summary = manager.summary("worse")
+    assert summary["trend"] == {"games": [1000, 2000, 3000], "spread": [-3.0, -40.0, -45.0], "ci": [7.0, 7.0, 7.0]}
+    assert summary["best_eval"] == {"games": 1000, "step": 100, "spread": -3.0, "ci": 7.0}
+    assert summary["health"]["state"] == "worse" and summary["health"]["edge"] == -4.0
+    assert summary["health"]["note"].startswith("It got worse as it trained: -45.0 +/- 7.0")
+
+    # The verdict follows the log as it grows.
+    with open(run_dir / "metrics.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(evaluation(4000, 12.0, 6.0)) + "\n")
+    summary = manager.summary("worse")
+    assert summary["trend"]["games"][-1] == 4000 and summary["health"]["state"] == "ahead"
+    assert summary["best_eval"]["games"] == 4000

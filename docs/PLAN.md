@@ -60,7 +60,7 @@ Not done from the original list: GCG import/export (moved to Phase 4) and criter
 | Same seeds give the same results | Yes (tested, independent of thread scheduling) |
 | Greedy's mean score next to the old log | 411 points a game for greedy against itself. The old log's two games averaged 281 a side, with a 10-letter word list and unknown weights, so the two are not comparable. |
 
-## Phase 3: RL pipeline (code done, not yet trained)
+## Phase 3: RL pipeline (code done; first runs did not learn)
 
 What exists: the afterstate encoder and batched environment in Rust; feature expansion on the
 GPU; the value network with a win head; Monte Carlo and TD(lambda) targets with the two-player
@@ -76,25 +76,91 @@ skipped on resume, the resume path, three unvalidated settings, cross-device res
 and none in the training targets, the input features or the sign convention, which they check
 against hand-worked examples.
 
-**What has not been checked, because it needs a real run:**
+### The first two runs (13 November 2026): both got worse as they trained
+
+Two runs with the original defaults (replay ratio 4, Monte Carlo targets, learning rate 0.001,
+batch 2,048, 100,000 warm-start games and 3,000 pretraining steps), started from the app. Spread
+is points a game against `greedy-leave` over 250 seat-swapped pairs.
+
+| | 6 x 64 (1,055,056 parameters) | 10 x 128 (3,655,316 parameters) |
+|---|---|---|
+| Self-play games, time | 450,005 in 2.19 h | 441,805 in 6.67 h |
+| Speed (median report) | 61.7 games/s | 18.8 games/s |
+| First evaluation | -3.2 ± 7.3 at 75,428 games | -7.7 ± 6.9 at 23,228 games |
+| Later | -47.4 ± 7.7 at 151,015 games | -33.7 at 70,000, -60.4 at 93,000, about -80 from 138,000 on |
+| Last evaluation | -44.7 ± 8.2 | -82.1 ± 8.3 |
+| Promotions after the first network | 0 | 0 |
+| Error on new games against leave values alone, end of run (RMSE) | 2.2 points worse | 5.0 points worse |
+| Error on training batches, start to end (mean absolute) | 53.6 to 50.4 | 53.6 to 47.0 |
+
+Neither run ever produced a network that beat its first evaluated one, so each run's `best.pt`
+is a network from the first minutes of self-play. Played against each other in the app (the two
+`best` networks, 500 pairs), the 10 x 128 one scored +4.4 ± 5.6 points a game, 51.7% of games,
+and -4.1 ± 5.1 against `greedy-leave` (500 pairs): two nearly untrained networks, level with each other and with the
+baseline. **That comparison says nothing about network size.**
+
+**Why: the networks memorised their games.** Every position was trained on about four times,
+each time against the final result of its own game. The positions of one game share that result
+and nearly the same board, so a network with a million weights can learn "this board went on to
+win by 60" in place of anything that carries over to a new game. A check of each run's final
+network on the CPU (not in the repo: it read the runs' saved replay buffers), on 12,000 positions
+from each end of the buffer and about 11,000 from fresh games:
+
+| Positions | 6 x 64: correlation of its correction with the truth | 6 x 64: RMSE against leave values alone | 10 x 128: correlation | 10 x 128: RMSE against leave values alone |
+|---|---|---|---|---|
+| Oldest in its replay buffer (seen most often) | 0.340 | 4.18 points better | 0.522 | 10.82 points better |
+| Newest in its replay buffer | 0.159 | 0.43 points better | 0.255 | 1.43 points better |
+| Fresh games it never saw | 0.022 | 0.94 points worse | 0.031 | 2.71 points worse |
+
+The corrections had a standard deviation of 13 to 21 points (6 x 64) and 22 to 36 points
+(10 x 128) and, on new positions, almost no relation to what followed. Choosing a move means
+taking the maximum over 64 candidates of score + leave value + correction, and a maximum over
+noise picks out the noise:
+
+| On 480 positions from greedy-leave games | 6 x 64 first network | 6 x 64 final | 10 x 128 first network | 10 x 128 final |
+|---|---|---|---|---|
+| Chooses the same move as the static evaluator | not recorded | 48% | 65% | 32% |
+| Static value given up per decision | 1.50 points | 3.60 points | 0.84 points | 7.60 points |
+
+Over the roughly 12 decisions a player makes in a game, 3.60 and 7.60 points a decision are about
+the 45 and 80 points a game the two runs lost by. The larger network fitted its own games more
+closely and played worse for it.
+
+**What changed in response** (in `configs/train.toml`, the `[train]` section, and
+`warmstart.steps`):
+
+| Setting | Was | Now | Why |
+|---|---|---|---|
+| `train.replay_ratio` | 4 | 1 | Train on each position about once, so there is nothing to memorise |
+| `train.td_lambda` | 1.0 | 0.7 | Targets lean on the estimate of the next position, not on one game's final result |
+| `train.learning_rate` | 0.001 | 0.0003 | Chase less of the noise that remains |
+| `train.batch_size` | 2,048 | 1,024 | Keep a useful number of updates per game at the lower replay ratio |
+| `train.actor_sync_steps` | 250 | 100 | Fewer training steps happen per game now; keep the self-play network as fresh |
+| `warmstart.steps` | 3,000 | 2,000 | Under one pass over the warm-start positions |
+| `train.guard`, `train.guard_patience` | none | on, 2 | When a network is significantly behind the best one at two evaluations in a row, go back to the best network's weights and halve the learning rate |
+
+The trainer now also logs its error on the batches it trains on as RMSE, so the app can draw it
+beside the error on new games; the gap between the two is the memorising. The app's run page
+states when a run has got worse, and [TUNING.md](TUNING.md) says what to try.
+
+**These changes follow from the diagnosis and are covered by tests, but no full run has used
+them yet.** Whether they are enough is the next thing to find out.
+
+**What is still open:**
 
 | Open question | How it gets answered |
 |---|---|
-| Does the network beat `greedy-leave`? | The eval lines of the first run. Until the interval excludes zero, it has not. |
-| Is training stable at the default learning rate, without normalization? | The loss and the value-error lines of the first hour. If not: `train.learning_rate=3e-4`, then `model.norm="group"`. |
+| Does the network beat `greedy-leave` with the new defaults? | A 6 x 64 run of two to three hours. The edge (leave-only error minus the network's, on new games) should go above zero within the first 100,000 games, and the evaluation should follow. |
+| If it only stays level? | In order: `train.td_lambda=0.5`; `train.learning_rate=1e-4`; a smaller head (`model.value_channels=2`, `model.head_hidden=128`: the first layer of the head has 460,800 weights that each read one channel of one square, out of the 6 x 64 network's 1,055,056, and that is where a particular board can be memorised); then targets from short look-ahead simulations in place of game results. |
+| Is a larger network better? | Only worth asking once the 6 x 64 one has beaten the baseline. Compare with a match of 1,000 pairs or more. |
 | What does pruning to 64 candidates cost? | Evaluate a trained network with `--candidates 64` against itself with `--candidates 256`. |
-| Is TD(lambda) better than Monte Carlo targets here? | A second run with `train.td_lambda=0.9`, compared by evaluation. |
 | How much do the cross-check planes buy? | A run with `model.cross_checks=false`, compared by evaluation. |
 
-**Recommended first run:** the defaults, overnight.
+**Recommended next run:** the defaults, 6 x 64, three hours.
 
 ```powershell
-uv run scrabble-ai train --config configs/train.toml --name night1 --hours 8
+uv run scrabble-ai train --config configs/train.toml --name td-run-1 --hours 3
 ```
-
-A five-minute dry run of that command ran at 58 self-play games a second with training in the
-loop, which extrapolates to about 1.7 million games in 8 hours. The estimate gets replaced by the
-run's own log.
 
 ## Phase 4: the app, analysis and play (app done)
 
@@ -155,7 +221,7 @@ network beats `greedy-leave` at all, and the result will be reported whichever w
 | Risk | What is done about it |
 |---|---|
 | The network does not beat greedy-leave | Report it plainly. Check the pruning cost and the value error first; then bring simulation forward. |
-| Monte Carlo targets are noisy (a game's remaining spread has a standard deviation of about 74 points) | Many games and large batches; TD(lambda) as the next experiment. |
+| Game results are noisy targets (a game's remaining spread has a standard deviation of about 74 points), and the first runs memorised them | TD(lambda) targets at 0.7, each position trained on about once, and a guard that returns to the best network. Not yet confirmed by a run. |
 | Exploration moves pollute the targets | The temperature falls over the run and is logged. |
 | A subtle engine bug poisons the training data | The reference comparison and the random-game invariants above. |
 | VRAM overflow silently slows training on Windows | PyTorch's share of VRAM is capped, so an oversized setting fails at once. |

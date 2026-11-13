@@ -27,7 +27,7 @@ pytest_plugins = ["app_fixtures"]
 
 SUMMARY_KEYS = {"name", "status", "phase", "network", "parameters", "games", "step", "positions", "hours",
                 "games_per_second", "created", "updated", "limit", "progress", "latest_eval", "best_step", "has_best",
-                "checkpoints", "changed", "error"}
+                "checkpoints", "changed", "error", "trend", "best_eval", "health"}
 STATE_KEYS = {"id", "seed", "players", "advisor", "board", "last_placed", "racks", "scores", "to_move", "turn", "bag",
               "scoreless_turns", "can_exchange", "unseen", "unseen_by_seat", "over", "result", "history"}
 CANDIDATE_KEYS = {"text", "kind", "word", "position", "score", "tiles", "leave", "exchanged", "leave_value", "value",
@@ -614,3 +614,18 @@ def test_the_server_listens_on_loopback_only(app):
     for ip in others:
         with pytest.raises(OSError):
             socket.create_connection((ip, app.port), timeout=0.5).close()
+
+
+def test_a_closed_connection_is_not_logged_as_an_error(app, capsys):
+    """Every page reload and closed window drops a kept-alive connection; the log is for real errors."""
+    for error in (ConnectionResetError(10054, "reset"), BrokenPipeError(), ConnectionAbortedError(), TimeoutError()):
+        try:
+            raise error
+        except OSError:
+            app.server.handle_error(None, ("127.0.0.1", 1))
+    assert capsys.readouterr().err == ""
+    try:
+        raise ValueError("a real bug")
+    except ValueError:
+        app.server.handle_error(None, ("127.0.0.1", 1))
+    assert "a real bug" in capsys.readouterr().err

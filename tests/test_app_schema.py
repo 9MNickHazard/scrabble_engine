@@ -11,7 +11,7 @@ from scrabble_ai.app import schema as schema_module
 from scrabble_ai.config import Config, load_config
 
 TYPES = {"int": int, "float": float, "bool": bool, "str": str}
-UNITS = {"hours", "games", "points", "steps", "positions", "minutes", "pairs"}
+UNITS = {"hours", "games", "points", "steps", "positions", "minutes", "pairs", "evaluations"}
 
 
 def config_fields() -> dict[str, tuple[type, object]]:
@@ -55,7 +55,13 @@ def test_each_field_describes_its_setting(fields):
         key = field["key"]
         field_type, default = known[key]
         assert set(field) == {"key", "label", "type", "default", "min", "max", "step", "multiple_of", "unit", "options",
-                              "advanced", "locked_on_resume", "help"}, key
+                              "advanced", "locked_on_resume", "help", "effects"}, key
+        effects = field["effects"]
+        assert set(effects) == {"lower", "higher", "typical"}, key
+        assert all(isinstance(text, str) for text in effects.values()), key
+        assert effects["lower"].strip() and effects["higher"].strip() and effects["typical"].strip(), \
+            f"{key}: the tuning guide says what lower and higher do and what is worth trying"
+        assert effects["lower"] != effects["higher"], key
         assert field["unit"] is None or (field["unit"] in UNITS and field_type in (int, float)), key
         assert not re.search(r"\((hours|games|points|steps|positions|minutes|pairs)\)", field["label"]), \
             f"{key}: the unit is its own field now, not part of the label"
@@ -165,3 +171,27 @@ def test_speed_parameter_counts_match_the_network(schema):
     for row in schema["speed"]:
         blocks, channels = map(int, row["network"].split("x"))
         assert parameter_count(ValueNet(ModelConfig(blocks=blocks, channels=channels))) == row["parameters"], row["network"]
+
+
+def test_the_tuning_guide_covers_every_setting_and_matches_the_docs(fields):
+    from scrabble_ai.app.schema import guide_markdown
+    from scrabble_ai.lexicon import REPO_ROOT
+
+    guide = guide_markdown()
+    rows = [line for line in guide.splitlines() if line.startswith("| **")]
+    assert len(rows) == len(fields)
+    for field, row in zip(fields, rows):
+        assert f"`{field['key']}`" in row and field["label"] in row, field["key"]
+        assert row.count(" | ") == 5, f"{field['key']}: six cells, and no stray column separators in the text"
+    # docs/TUNING.md carries the same tables, so the page and the app cannot drift apart.
+    document = (REPO_ROOT / "docs" / "TUNING.md").read_text(encoding="utf-8")
+    assert schema_module.GUIDE_MARKER in document
+    assert document.endswith(schema_module.GUIDE_MARKER + "\n\n" + guide), \
+        "docs/TUNING.md is out of date: run `python -m scrabble_ai.app.schema --write`"
+
+
+def test_the_guard_settings_are_described(fields):
+    by_key = {field["key"]: field for field in fields}
+    assert by_key["train.guard"]["type"] == "bool" and by_key["train.guard"]["default"] is True
+    patience = by_key["train.guard_patience"]
+    assert (patience["type"], patience["default"], patience["min"], patience["unit"]) == ("int", 2, 1, "evaluations")

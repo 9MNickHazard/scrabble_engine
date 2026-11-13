@@ -153,6 +153,17 @@ def quick_stats(games: dict[str, list]) -> dict:
     return {"spread": clean(result.spread), "spread_ci": clean(result.spread_ci), "win_rate": clean(result.win_rate)}
 
 
+def of_run(spec, run: str) -> bool:
+    """Is `spec` a model of the run `run`? (The run is compared without regard to case, as
+    Windows compares folder names.)"""
+    return isinstance(spec, str) and spec.startswith("model:") and spec[6:].partition("/")[0].lower() == run.lower()
+
+
+def renamed_spec(spec, old: str, new: str):
+    """`spec` pointed at the run's new name if it is a model of the run `old`; any other spec as it is."""
+    return f"model:{new}/{spec[6:].partition('/')[2]}" if of_run(spec, old) else spec
+
+
 class Matches:
     def __init__(self, app_dir: Path, players: Players):
         self.dir = app_dir / "matches"
@@ -239,3 +250,44 @@ class Matches:
 
     def cancel(self, match_id: str) -> None:
         (self._folder(match_id) / "CANCEL").write_text("", encoding="utf-8")
+
+    def _of_run(self, run: str) -> list[tuple[Path, dict, bool]]:
+        """(folder, spec, still running) for every match in which a model of the run `run` plays."""
+        if not self.dir.is_dir():
+            return []
+        found = []
+        for folder in sorted(self.dir.iterdir()):
+            spec = read_json(folder / "spec.json") if folder.is_dir() else None
+            if spec is None or not (of_run(spec.get("a"), run) or of_run(spec.get("b"), run)):
+                continue
+            try:
+                summary = self._summary(folder)
+            except (KeyError, TypeError, ValueError, ArithmeticError):  # a spec.json `start` did not write
+                summary = None
+            found.append((folder, spec, summary is not None and summary["status"] == "running"))
+        return found
+
+    def running_with(self, run: str) -> list[str]:
+        """The ids of the matches still running in which a model of the run `run` plays. Their
+        job holds the model's path, so the run must not be renamed under them."""
+        return [folder.name for folder, _, running in self._of_run(run) if running]
+
+    def rename_run(self, old: str, new: str) -> list[str]:
+        """Point the matches played by models of the run `old` at its new name `new`: the player
+        specs in their spec.json and the names shown for them, so that they list under the new
+        name and their games can still be replayed. Running matches are left alone (the server
+        refuses the rename while there are any). Returns the ids of the matches changed."""
+        changed = []
+        for folder, spec, running in self._of_run(old):
+            if running:
+                continue
+            for side in ("a", "b"):
+                if of_run(spec.get(side), old):
+                    spec[side] = renamed_spec(spec[side], old, new)
+                    try:
+                        spec[f"{side}_name"] = players_module.name(spec[side])
+                    except PlayerError:
+                        pass  # not a model id a match could have started with: keep the name it has
+            write_json(folder / "spec.json", spec)
+            changed.append(folder.name)
+        return changed

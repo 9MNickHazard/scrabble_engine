@@ -110,19 +110,29 @@ Two choices keep an untrained network sane:
 A value always belongs to an afterstate and is always from the side of the player who made the
 move. The next afterstate in the game belongs to the opponent.
 
-- **Monte Carlo target** (default): for each afterstate, the mover's final spread minus their
-  spread right after the move. Games are short, and this is unbiased.
-- **TD(lambda)** (`train.td_lambda < 1`): mixes in the value given to the next afterstate:
-  `g[t] = -(score[t+1] + (1 - lambda) * V[t+1] + lambda * g[t+1])`. The minus sign is the whole
-  point: the opponent's score and everything they go on to gain count against the mover. The old
-  project added these instead of subtracting them. The values used come from the self-play copy of
-  the network, which lags the learner, so it plays the role of a target network.
+- **Monte Carlo target** (`train.td_lambda = 1`): for each afterstate, the mover's final spread
+  minus their spread right after the move. It is unbiased, and very noisy: one game's result,
+  with a standard deviation of about 74 points, shared by every position of that game. This was
+  the default for the first two runs, which memorised those results ([PLAN.md](PLAN.md)).
+- **TD(lambda)** (the default, `train.td_lambda = 0.7`): mixes in the value given to the next
+  afterstate: `g[t] = -(score[t+1] + (1 - lambda) * V[t+1] + lambda * g[t+1])`. The minus sign is
+  the whole point: the opponent's score and everything they go on to gain count against the mover.
+  The old project added these instead of subtracting them. The values used come from the self-play
+  copy of the network, which lags the learner, so it plays the role of a target network. In the
+  warm-start games, played by the static evaluator, `V` is the leave value.
 - **Win target:** 1, 0.5 or 0 for the mover, trained with cross-entropy.
 - **Going out** is exact: the game is over, nothing remains to be gained, so its value is 0 by
   definition and it is not a training example. The bonus is part of the move's score.
 - The reward is the spread and nothing else. Gamma is 1. There are no shaping terms.
 
 Loss: Huber on the value plus 0.5 x cross-entropy on the win logit.
+
+**The guard.** At each evaluation the network plays the best one so far. If it is significantly
+behind (the whole 95% interval below zero) at `train.guard_patience` evaluations in a row, the
+trainer loads the best network's weights back into the learner and the self-play copy, starts a
+fresh optimizer and halves the learning rate (down to 1/64 of its setting at most). The replay
+buffer is kept. A run can then waste time but cannot end far below its best, and the learning
+rate comes down by itself when it was too high. The scale is saved in checkpoints.
 
 ## Self-play
 

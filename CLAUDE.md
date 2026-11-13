@@ -34,7 +34,13 @@ the old code. Machine-specific notes, if any, are in `CLAUDE.local.md` (not comm
 - The GPU is an RTX 5070 Ti (Blackwell, sm_120): PyTorch comes from the `cu132` index pinned in
   `pyproject.toml`. `uv run scrabble-ai gpu-check` must pass after any PyTorch change.
 - Config is TOML read with the standard library into dataclasses (`src/scrabble_ai/config.py`);
-  `configs/train.toml` must list every setting with its default (a test checks this).
+  `configs/train.toml` must list every setting with its default (a test checks this). Every
+  setting also needs its entry in `src/scrabble_ai/app/schema.py` (label, what it does, what
+  lower and higher do, the range worth trying); `docs/TUNING.md` carries the tables that file
+  generates (`python -m scrabble_ai.app.schema --write`), and a test fails when they differ.
+- The first real runs (2026-11-13) memorised their own games and got worse; `docs/PLAN.md` has
+  the numbers and the changed defaults (replay ratio 1, TD(lambda) 0.7, the guard). Those
+  defaults are untested by a full run: do not describe them as working until one says so.
 - `legacy/` is reference only. Do not import from it, fix it or extend it.
 - The desktop app is `src/scrabble_ai/app/` (`uv run scrabble-ai app`; docs in `docs/APP.md`,
   the page/server contract in `docs/APP_API.md`). The server is standard-library Python bound to

@@ -15,11 +15,11 @@ import numpy as np
 import pytest
 
 from scrabble_ai.app import insights
-from scrabble_ai.app.insights import match_summary, run_report
+from scrabble_ai.app.insights import match_summary, run_overview, run_report
 
 EVENT_KEYS = {"games", "hours", "kind", "tone", "title", "detail"}
 SUMMARY_KEYS = {"games", "hours", "steps", "mean_games_per_second", "best", "final", "first_significant",
-                "promotions", "value_rmse_gain"}
+                "promotions", "value_rmse_gain", "health"}
 MATCH_KEYS = {"spread", "spread_ci", "win_rate", "win_ci", "significant", "score_a", "score_b", "turns", "a_first",
               "a_second", "bingos_a", "bingos_b", "exchanges_a", "exchanges_b", "passes_a", "passes_b",
               "ended_by_going_out"}
@@ -238,7 +238,7 @@ def test_significantly_worse_than_baseline():
     [event] = kinds(report, "significant")
     assert event["tone"] == "warning" and event["title"] == "Significantly worse than greedy-leave"
 
-    report = run_report("night1", make_run([(1.0, 5.0), (-8.2, 4.0)]))
+    report = run_report("night1", make_run([(1.0, 5.0), (-6.5, 4.0)]))
     assert report["headline"].endswith("It has not been shown to beat it at any evaluation; the best was +1.0 +/- 5.0.")
 
     report = run_report("night1", make_run([(6.0, 3.0), (-6.0, 3.0)]))
@@ -643,3 +643,119 @@ def test_fallback_statistics_match_evaluate():
         theirs = summarize("A", "B", sf, ss, sa, sb, np.zeros(2 * n))
         assert ours == pytest.approx((theirs.spread, theirs.spread_ci, theirs.win_rate, theirs.win_ci,
                                       theirs.score_a, theirs.score_b))
+
+
+# ---- health, and the events of a run that got worse -------------------------------------------
+
+
+def worse_edge(from_minute, value=77.0, leave=74.0, minutes=400):
+    """Self-play reports from `from_minute` on in which the network predicts new games worse than
+    leave values alone."""
+    return {m: {"value_rmse_points": value, "leave_only_rmse_points": leave} for m in range(from_minute, minutes)}
+
+
+def test_health_is_null_before_the_first_evaluation():
+    assert run_report("r", [])["summary"]["health"] is None
+    assert run_report("r", make_run([], extra_minutes=30))["summary"]["health"] is None
+    overview = run_overview(make_run([], extra_minutes=30))
+    assert overview == {"trend": {"games": [], "spread": [], "ci": []}, "best_eval": None, "health": None}
+
+
+@pytest.mark.parametrize("evals, state, start", [
+    ([(2.0, 5.0), (9.0, 4.0)], "ahead", "Ahead of greedy-leave: +9.0 +/- 4.0"),
+    ([(2.0, 5.0), (3.0, 5.0)], "level", "Level with greedy-leave: +3.0 +/- 5.0"),
+    ([(-9.0, 5.0), (-8.0, 5.0)], "behind", "Behind greedy-leave: -8.0 +/- 5.0"),
+    ([(-3.0, 7.0), (-47.0, 8.0), (-45.0, 8.0)], "worse", "It got worse as it trained: -45.0 +/- 8.0"),
+    # Below its best by less than noise between two evaluations explains: not "worse".
+    ([(2.0, 6.0), (-7.0, 5.0)], "behind", "Behind greedy-leave"),
+    # Still significantly ahead, although below its best: ahead, and the note says so.
+    ([(40.0, 5.0), (10.0, 5.0)], "ahead", "Ahead of greedy-leave: +10.0 +/- 5.0"),
+])
+def test_health_states(evals, state, start):
+    health = run_report("r", make_run(evals))["summary"]["health"]
+    assert set(health) == {"state", "edge", "note"}
+    assert health["state"] == state and health["note"].startswith(start), health
+    assert health["edge"] == 1.0, "the mean of leave-only error minus the network's, over the last ten reports"
+    assert run_overview(make_run(evals))["health"] == health
+
+
+def test_health_of_a_run_that_was_further_ahead_says_so():
+    health = run_report("r", make_run([(40.0, 5.0), (10.0, 5.0)]))["summary"]["health"]
+    assert health["note"].endswith("It was further ahead earlier (+40.0 +/- 5.0 at 67,200 games).")
+
+
+def test_a_run_that_got_worse_is_described_as_such():
+    records = make_run([(-3.0, 7.0), (-47.0, 8.0), (-45.0, 8.0)], gates=[None, False, False], plant=worse_edge(15))
+    # The trainer logs the first evaluated network as a gate record with no spread and no pairs.
+    first = next(i for i, r in enumerate(records) if r["kind"] == "eval")
+    records.insert(first + 2, rec("gate", records[first]["games"], records[first]["hours"], records[first]["step"],
+                                  spread=None, spread_ci=None, win_rate=None, best_step=records[first]["step"],
+                                  promoted=True, pairs=0))
+    report = run_report("night1", records)
+    check_shape(report)
+    assert report["headline"] == ("night1 got worse as it trained: its latest evaluation against greedy-leave is "
+                                  "-45.0 +/- 8.0 points a game, down from -3.0 +/- 7.0 at 67,200 games. It was never "
+                                  "shown to beat greedy-leave.")
+    health = report["summary"]["health"]
+    assert health["state"] == "worse" and health["edge"] == -3.0
+    assert health["note"] == ("It got worse as it trained: -45.0 +/- 8.0 points a game against greedy-leave at the "
+                              "latest evaluation, down from -3.0 +/- 7.0 at 67,200 games. Its best network is still "
+                              "the first one evaluated. On games it has not trained on, its predictions are 3.0 points "
+                              "of RMSE worse than leave values alone, as they are when a network memorises its "
+                              "training games.")
+    [event] = kinds(report, "overfit")
+    assert event["tone"] == "warning" and event["title"] == "Predicting new games worse than leave values alone"
+    # The reports go bad at minute 15. The mean of ten reports is first below -0.5 at minute 18, when four
+    # of the ten are bad: (6 x +1 + 4 x -3) / 10 = -0.6, the network's error averaging (6 x 73 + 4 x 77) / 10.
+    assert "averaged 74.6 points of RMSE, against 74.0 for leave values alone" in event["detail"]
+    assert event["hours"] == round(0.05 + 18 / 60, 4) and event["hours"] < records[first]["hours"]
+
+
+def test_no_overfit_event_while_the_network_predicts_new_games_better():
+    report = run_report("r", make_run([(2.0, 5.0)] * 4))
+    assert kinds(report, "overfit") == []
+    # Fewer than ten reports are too few to say, however bad they look.
+    report = run_report("r", make_run([], extra_minutes=9, plant=worse_edge(1)))
+    assert kinds(report, "overfit") == []
+    # A short dip does not average below the margin over ten reports.
+    report = run_report("r", make_run([], extra_minutes=40, plant={m: {"value_rmse_points": 76.0} for m in (5, 6, 7)}))
+    assert kinds(report, "overfit") == []
+
+
+def test_the_overfit_event_is_reported_once():
+    report = run_report("r", make_run([], extra_minutes=120, plant=worse_edge(30)))
+    assert len(kinds(report, "overfit")) == 1
+
+
+def test_guard_records_become_events():
+    records = make_run([(-3.0, 7.0), (-30.0, 7.0)])
+    last = records[-1]
+    records.append(rec("guard", last["games"], last["hours"], last["step"], action="rollback", to_step=6200,
+                       learning_rate_scale=0.5,
+                       reason="2 evaluations in a row significantly behind best@6200 (latest -28.0 +/- 6.0)"))
+    records.append(rec("guard", last["games"] + 5000, last["hours"] + 0.5, last["step"] + 900, action="rollback"))
+    records.append("not a record")
+    report = run_report("r", records)
+    check_shape(report)
+    first, second = kinds(report, "guard")
+    assert first["tone"] == "warning" and first["title"] == "Guard went back to the best network"
+    assert first["detail"] == ("Training had made the network worse, so the trainer went back to its best network "
+                               "(step 6,200) and lowered the learning rate to 0.5 times its setting. 2 evaluations in a "
+                               "row significantly behind best@6200 (latest -28.0 +/- 6.0).")
+    assert second["detail"] == "Training had made the network worse, so the trainer went back to its best network."
+
+
+def test_run_overview_gives_the_trend_and_the_best_evaluation():
+    records = make_run([(-3.0, 7.0), (4.0, 6.0), (1.0, None)])
+    overview = run_overview(records)
+    assert overview["trend"] == {"games": [67200, 134400, 201600], "spread": [-3.0, 4.0, 1.0], "ci": [7.0, 6.0, None]}
+    assert overview["best_eval"] == {"games": 134400, "step": 3000 + 160 * 40, "spread": 4.0, "ci": 6.0}
+    assert overview["health"]["state"] == "level"
+    # Evaluations against other opponents are not part of the trend.
+    assert len(run_overview(make_run([(1.0, 5.0)] * 3, greedy=True))["trend"]["games"]) == 3
+
+
+@pytest.mark.parametrize("records", [None, "nonsense", [None, 3, "x"], [{"kind": "eval"}], [{"kind": "eval", "opponent": "greedy-leave", "spread": "abc"}],
+                                     [{"kind": "selfplay", "value_rmse_points": float("nan")}]])
+def test_run_overview_never_raises(records):
+    assert run_overview(records) == {"trend": {"games": [], "spread": [], "ci": []}, "best_eval": None, "health": None}

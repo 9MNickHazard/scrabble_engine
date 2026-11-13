@@ -113,12 +113,10 @@ class Trainer:
         self.actor_net = copy.deepcopy(self.net).eval()
         self.best_net: ValueNet | None = None
         self.best_step = -1
-        decay = [p for p in self.net.parameters() if p.ndim > 1]
-        no_decay = [p for p in self.net.parameters() if p.ndim <= 1]
-        self.optimizer = torch.optim.AdamW(
-            [{"params": decay, "weight_decay": train.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
-            lr=train.learning_rate,
-        )
+        self.optimizer = self._new_optimizer()
+        self.lr_scale = 1.0  # halved each time the guard goes back to the best network
+        self.worse_streak = 0  # evaluations in a row significantly behind the best
+        self.rollbacks = 0
         amp = train.amp and self.device.type == "cuda"
         self.features = FeatureBuilder(self.device, model.cross_checks, torch.bfloat16 if amp else torch.float32)
         self.replay = Replay(train.replay_capacity)
@@ -132,7 +130,7 @@ class Trainer:
         self.warm_next_seed = run.seed * 1_000_000_000  # seed of the next warm-start game
         self.samples_owed = 0.0
         self.window = ActorStats()
-        self.losses: list[tuple[float, float, float, float]] = []
+        self.losses: list[tuple[float, float, float, float, float]] = []
 
         # Self-play seeds for this run start well away from the evaluation seeds.
         self.seed_base = run.seed * 1_000_000_000
@@ -150,6 +148,15 @@ class Trainer:
         (self.run_dir / "config.toml").write_text(config_toml(config), encoding="utf-8")
 
     # ---- setup ---------------------------------------------------------------------------
+
+    def _new_optimizer(self) -> torch.optim.Optimizer:
+        train = self.config.train
+        decay = [p for p in self.net.parameters() if p.ndim > 1]
+        no_decay = [p for p in self.net.parameters() if p.ndim <= 1]
+        return torch.optim.AdamW(
+            [{"params": decay, "weight_decay": train.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
+            lr=train.learning_rate,
+        )
 
     def _new_actor(self) -> Actor:
         c = self.config
@@ -181,7 +188,7 @@ class Trainer:
     def learning_rate(self) -> float:
         train = self.config.train
         warm = min(1.0, (self.step + 1) / max(1, train.warmup_steps))
-        return train.learning_rate * warm
+        return train.learning_rate * warm * self.lr_scale
 
     def train_step(self) -> None:
         train, model = self.config.train, self.config.model
@@ -216,8 +223,9 @@ class Trainer:
         self.step += 1
 
         with torch.no_grad():
-            error = (value * train.value_scale + baseline - target).abs().mean()
-        self.losses.append((loss.item(), value_loss.item(), win_loss.item(), error.item()))
+            miss = value * train.value_scale + baseline - target
+            error, squared = miss.abs().mean(), miss.square().mean()
+        self.losses.append((loss.item(), value_loss.item(), win_loss.item(), error.item(), squared.item()))
         if self.step % train.actor_sync_steps == 0:
             self.actor_net.load_state_dict(self.net.state_dict())
 
@@ -239,7 +247,8 @@ class Trainer:
         if self.warm_games < warm.games:
             slots = max(self.config.selfplay.games, 512)
             actor = Actor(self.engine, self.leaves, self.replay, slots, warm.max_candidates,
-                          min(self.config.selfplay.max_exchanges, warm.max_candidates - 2), 1.0, self.device,
+                          min(self.config.selfplay.max_exchanges, warm.max_candidates - 2),
+                          self.config.train.td_lambda, self.device,
                           first_seed=self.warm_next_seed, sampling_seed=self.config.run.seed + 2 + self.warm_games)
             self._say(f"warm start: {warm.games - self.warm_games:,} games by the static evaluator "
                       f"(temperature {warm.temperature})")
@@ -277,10 +286,14 @@ class Trainer:
     def _report_training(self) -> None:
         if not self.losses:
             return
-        loss, value_loss, win_loss, error = np.mean(self.losses, axis=0)
+        loss, value_loss, win_loss, error, squared = np.mean(self.losses, axis=0)
         self.losses.clear()
+        # These errors are on positions drawn from the replay buffer, which the network may have
+        # trained on before. Next to the self-play report's error on new games they show whether
+        # it is learning or memorising.
         self._log("train", {"loss": float(loss), "value_loss": float(value_loss), "win_loss": float(win_loss),
-                            "value_error_points": float(error), "learning_rate": self.learning_rate()})
+                            "value_error_points": float(error), "value_rmse_points": float(squared) ** 0.5,
+                            "learning_rate": self.learning_rate()})
         self._say(f"  step {self.step:,}: loss {loss:.4f} (value {value_loss:.4f}, win {win_loss:.4f}), "
                   f"mean value error {error:.1f} points")
 
@@ -353,7 +366,30 @@ class Trainer:
                 self._log("gate", {"spread": None, "spread_ci": None, "win_rate": None, "best_step": self.step,
                                    "promoted": True, "pairs": 0})
             self._write_index()
+            self.worse_streak = 0
+        else:
+            # Significantly behind the best: the whole interval is below zero.
+            behind = gate is not None and gate.spread + gate.spread_ci < 0
+            self.worse_streak = self.worse_streak + 1 if behind else 0
+            if train.guard and self.worse_streak >= train.guard_patience:
+                self._rollback(f"{self.worse_streak} evaluations in a row significantly behind best@{self.best_step} "
+                               f"(latest {gate.spread:+.1f} +/- {gate.spread_ci:.1f})")
         return results
+
+    def _rollback(self, reason: str) -> None:
+        """The guard: training has made the network worse, so go back to the best one and carry on
+        more carefully. The replay buffer is kept; the optimizer starts afresh."""
+        self.net.load_state_dict(self.best_net.state_dict())
+        self.actor_net.load_state_dict(self.best_net.state_dict())
+        self.optimizer = self._new_optimizer()
+        self.lr_scale = max(self.lr_scale * 0.5, 1 / 64)
+        self.worse_streak = 0
+        self.rollbacks += 1
+        self.losses.clear()
+        self._say(f"guard: back to the best network (step {self.best_step}), learning rate now "
+                  f"{self.config.train.learning_rate * self.lr_scale:.2e}: {reason}")
+        self._log("guard", {"action": "rollback", "to_step": self.best_step, "learning_rate_scale": self.lr_scale,
+                            "reason": reason})
 
     def _write_index(self) -> None:
         """checkpoints/index.json: what the app needs to list this run's models without loading
@@ -401,6 +437,9 @@ class Trainer:
             "warm_games": self.warm_games,
             "warm_next_seed": self.warm_next_seed,
             "samples_owed": self.samples_owed,
+            "lr_scale": self.lr_scale,
+            "worse_streak": self.worse_streak,
+            "rollbacks": self.rollbacks,
             "replay": self.replay.state(),
             "actor": self.actor.state(),
             "numpy_rng": self.rng.bit_generator.state,
@@ -437,6 +476,9 @@ class Trainer:
         self.optimizer.load_state_dict(state["optimizer"])
         self.step, self.games, self.positions = state["step"], state["games"], state["positions"]
         self.elapsed, self.phase, self.samples_owed = state["elapsed"], state["phase"], state["samples_owed"]
+        # Absent from checkpoints written before the guard existed.
+        self.lr_scale, self.worse_streak = state.get("lr_scale", 1.0), state.get("worse_streak", 0)
+        self.rollbacks = state.get("rollbacks", 0)
         self.warm_games, self.warm_next_seed = state["warm_games"], state["warm_next_seed"]
         self.rng.bit_generator.state = state["numpy_rng"]
         try:

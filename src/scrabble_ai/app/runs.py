@@ -28,6 +28,7 @@ import tomllib
 from pathlib import Path
 
 from scrabble_ai import engine as engine_module
+from scrabble_ai.app import insights
 from scrabble_ai.app.procs import (  # noqa: F401  (pid_alive, kill_process and read_json are re-exported)
     kill_process, marker_pid, marker_time, pid_alive, read_json, started_after,
 )
@@ -101,6 +102,14 @@ class _Metrics:
         self.path = path
         self.offset = 0
         self.records: list[dict] = []
+        self._overview: tuple[int, int, dict] | None = None
+
+    def overview(self) -> dict:
+        """How training went (insights.run_overview), worked out again only when the log has changed."""
+        key = (self.offset, len(self.records))
+        if self._overview is None or self._overview[:2] != key:
+            self._overview = (*key, insights.run_overview(self.records))
+        return self._overview[2]
 
     def refresh(self) -> list[dict]:
         try:
@@ -247,7 +256,9 @@ class RunManager:
 
     def summary(self, name: str) -> dict:
         run_dir = self.path(name)
-        records = self.records(name)
+        with self.lock:
+            records = self.records(name)
+            overview = self._metrics[name].overview()
         config = self.config(name)
         flat = flatten(config)
         status, error = self._status(run_dir, records)
@@ -315,6 +326,7 @@ class RunManager:
             "checkpoints": checkpoints,
             "changed": changed,
             "error": error,
+            **overview,  # trend, best_eval, health
         }
 
     def list(self) -> list[dict]:
@@ -550,6 +562,113 @@ class RunManager:
                                        "try again in a moment") from None
                     time.sleep(0.25)
             self._metrics.pop(name, None)
+
+    def rename(self, name: str, new: str) -> None:
+        """Rename a run: its folder, the name in its config.toml, and what is cached under the
+        name. The stars, notes and matches of its models are the caller's to carry over (the
+        server's `_rename_run` does).
+
+        The checkpoint files keep the old name in the settings saved inside them, and are left
+        alone: the app always resumes a run with `--name <run>`, which overrides that name, and
+        the trainer then writes the new one into config.toml and every later checkpoint."""
+        run_dir = self.path(name)
+        if not run_dir.is_dir():
+            raise RunError(f"there is no run named {name!r}")
+        if not isinstance(new, str):
+            raise RunError("the new name must be text")
+        target = self.path(new)
+        with self.lock:
+            # Everything that can refuse comes before the folder moves.
+            names = self.names()
+            # The folder's own spelling (Windows also finds runs/night1 as runs/Night1).
+            current = name if name in names else next((n for n in names if n.lower() == name.lower()), name)
+            run_dir = self.runs_dir / current
+            if new == current:
+                raise RunError(f"{current} already has that name")
+            if new.lower() != current.lower():  # a change of case only is allowed
+                taken = next((n for n in names if n.lower() == new.lower()), None)
+                if taken is not None or target.exists():
+                    raise RunError(f"a run named {(taken or new)!r} already exists")
+            status, _ = self._status(run_dir, self.records(current))
+            if status in ("running", "stopping", "queued"):
+                advice = {"running": "stop it first", "stopping": "wait until it has stopped",
+                          "queued": "take it out of the queue first"}[status]
+                raise RunError(f"{current} is {status}; {advice}")
+            if run_dir.resolve().parent != self.runs_dir.resolve() or target.resolve().parent != self.runs_dir.resolve():
+                raise RunError("refusing to rename outside the runs folder")
+            try:
+                config_text = _renamed_config((run_dir / "config.toml").read_bytes().decode("utf-8"), new)
+            except (OSError, UnicodeDecodeError):
+                config_text = None  # a run that never started has none yet
+            _rename_folder(run_dir, target)
+            if config_text is not None:
+                temporary = target / "config.toml.tmp"
+                try:
+                    temporary.write_bytes(config_text.encode("utf-8"))
+                    os.replace(temporary, target / "config.toml")
+                except OSError as error:
+                    temporary.unlink(missing_ok=True)
+                    _rename_folder(target, run_dir)  # back as it was
+                    raise RunError(f"{current} was not renamed: its config.toml could not be written ({error})") from None
+            # Neither name may serve the old folder's records from the cache: a new run can take the old name.
+            for key in [key for key in self._metrics if key.lower() in (current.lower(), new.lower())]:
+                del self._metrics[key]
+
+
+def _rename_folder(source: Path, target: Path) -> None:
+    """Rename a run folder. A process that has just finished can hold a file in it open for a
+    moment longer, and Windows will not rename a folder with an open file in it: give it a few
+    seconds before giving up. A change of case only goes through a temporary name, since where
+    folder names ignore case a direct rename can do nothing or fail."""
+    if source.name.lower() == target.name.lower():
+        temporary = source.with_name(f".renaming-{os.urandom(4).hex()}")  # not a run name: never listed
+        _rename_folder(source, temporary)
+        try:
+            _rename_folder(temporary, target)
+        except RunError:
+            _rename_folder(temporary, source)
+            raise
+        return
+    for attempt in range(20):
+        try:
+            os.rename(source, target)
+            return
+        except FileExistsError:
+            raise RunError(f"a run named {target.name!r} already exists") from None
+        except FileNotFoundError:
+            raise RunError(f"there is no run named {source.name!r}") from None
+        except OSError:
+            if attempt == 19:
+                raise RunError(f"{source.name} still has files open (its process may be closing down); "
+                               "try again in a moment") from None
+            time.sleep(0.25)
+
+
+_TOML_TABLE = re.compile(r"^[ \t]*\[([^\[\]\r\n]+)\][ \t]*(?:#[^\r\n]*)?\r?$", re.M)
+_TOML_NAME = re.compile(r"""^([ \t]*name[ \t]*=[ \t]*)("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')""", re.M)
+
+
+def _renamed_config(text: str, new: str) -> str | None:
+    """A config.toml with the `name` under `[run]` set to `new` and every other byte as it was,
+    or None when it has no such line or the result would not read back as the same settings
+    with the new name (it is then left as it is: the app passes the name to the trainer)."""
+    tables = list(_TOML_TABLE.finditer(text))
+    run = next((i for i, table in enumerate(tables) if table[1].strip() == "run"), None)
+    if run is None:
+        return None
+    end = tables[run + 1].start() if run + 1 < len(tables) else len(text)
+    line = _TOML_NAME.search(text, tables[run].end(), end)
+    if line is None:
+        return None
+    result = text[:line.start(2)] + json.dumps(new) + text[line.end(2):]
+    try:
+        expected, renamed = tomllib.loads(text), tomllib.loads(result)
+    except tomllib.TOMLDecodeError:
+        return None
+    if not isinstance(expected.get("run"), dict):
+        return None
+    expected["run"]["name"] = new
+    return result if renamed == expected else None
 
 
 def _mtime(path: Path) -> float:

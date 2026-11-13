@@ -11,6 +11,7 @@ import math
 import mimetypes
 import re
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -22,7 +23,7 @@ from scrabble_ai import __version__
 from scrabble_ai import engine as engine_module
 from scrabble_ai.app import schema as schema_module
 from scrabble_ai.app.library import Library
-from scrabble_ai.app.matches import Matches
+from scrabble_ai.app.matches import Matches, renamed_spec
 from scrabble_ai.app.players import NotFound, PlayerError, Players
 from scrabble_ai.app.runs import APP_DIR, RUNS_DIR, RunError, RunManager
 from scrabble_ai.app.sessions import Sessions
@@ -179,6 +180,34 @@ def _delete_run(state: AppState, name: str) -> dict:
     return {"ok": True}
 
 
+def _rename_run(state: AppState, name: str, body: dict) -> dict:
+    _run_or_404(state, name)
+    new = body.get("name")
+    if not isinstance(new, str):
+        raise RunError("name must be the run's new name")
+    if state.matches.running_with(name):
+        raise RunError(f"a match involving {name} is still running; rename the run once it has finished or been cancelled")
+    state.runs.rename(name, new)
+    # The run has its new name from here on, and what refers to it follows. Games in progress
+    # look their networks up by spec at every move: point them at the new name too (the network
+    # is then loaded again from its new path, since Players caches by path).
+    with state.sessions.lock:
+        games = list(state.sessions.sessions.values())
+    for game in games:
+        with game.lock:
+            game.specs = [renamed_spec(spec, name, new) for spec in game.specs]
+            game.advisor = renamed_spec(game.advisor, name, new)
+    failed = []
+    for what, follow in (("its stars and notes", state.library.rename_run), ("its matches", state.matches.rename_run)):
+        try:
+            follow(name, new)
+        except OSError as error:  # one that cannot follow must not stop the other
+            failed.append(f"{what} ({error})")
+    if failed:
+        raise RunError(f"{name} was renamed to {new}, but {' and '.join(failed)} could not be updated")
+    return state.runs.summary(new)
+
+
 def _create_game(state: AppState, body: dict) -> dict:
     players = body.get("players")
     if not isinstance(players, list) or len(players) != 2 or not all(isinstance(p, str) for p in players):
@@ -213,6 +242,7 @@ ROUTES = [
      lambda s, m, b, q: {"lines": s.runs.log(_run_or_404(s, m[1]), _integer(q.get("tail", 200), "tail", 0, 100_000))}),
     ("GET", r"/api/runs/([^/]+)/report", lambda s, m, b, q: _report(s, m[1])),
     ("POST", r"/api/runs/([^/]+)/stop", lambda s, m, b, q: _stop_run(s, m[1], b)),
+    ("POST", r"/api/runs/([^/]+)/rename", lambda s, m, b, q: _rename_run(s, m[1], b)),
     ("POST", r"/api/runs/([^/]+)/resume",
      lambda s, m, b, q: s.runs.resume(_run_or_404(s, m[1]), b.get("hours"), b.get("max_games"), b.get("overrides"))),
     ("GET", r"/api/models", lambda s, m, b, q: s.library.models()),
@@ -329,10 +359,19 @@ def make_handler(state: AppState, log_path: Path | None = None):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        """A page that closes a connection it was keeping open (every reload and every closed
+        window does) is not an error: keep those tracebacks out of the log so real ones show."""
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def create_server(port: int = 0, state: AppState | None = None, log_path: Path | None = None) -> ThreadingHTTPServer:
     """A server on 127.0.0.1 (port 0 picks a free port). Call `serve_forever()` on it."""
     state = state or AppState()
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, log_path))
+    server = _Server(("127.0.0.1", port), make_handler(state, log_path))
     server.daemon_threads = True
     server.state = state
     return server

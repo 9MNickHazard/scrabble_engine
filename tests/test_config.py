@@ -147,6 +147,7 @@ def test_later_sources_win(tmp_path):
     ("train.td_lambda=-0.1", "td_lambda"),
     ("train.batch_size=0", "batch_size"),
     ("train.learning_rate=0", "learning_rate"),
+    ("train.guard_patience=0", "train.guard_patience must be at least 1"),
     ("train.min_replay=10", "train.min_replay must be at least train.batch_size"),
     ("train.replay_capacity=50000", "train.replay_capacity must be at least train.min_replay"),
     ("train.value_scale=0", "value_scale"),
@@ -205,3 +206,12 @@ def test_apply_dict_leaves_other_values_alone():
 def test_validate_rejects_settings_that_would_fail_later(item):
     with pytest.raises(ConfigError):
         load_config(None, [item])
+
+
+def test_the_training_defaults_are_the_ones_that_do_not_memorise():
+    """Changed on 2026-11-13 after the first real runs (docs/PLAN.md): each position is trained on
+    about once, targets lean on the next position's estimate, and the guard is on."""
+    train = Config().train
+    assert (train.replay_ratio, train.td_lambda, train.learning_rate, train.batch_size) == (1.0, 0.7, 3e-4, 1024)
+    assert train.guard is True and train.guard_patience == 2
+    assert load_config(REPO_ROOT / "configs" / "train.toml") == Config(), "configs/train.toml lists the defaults"

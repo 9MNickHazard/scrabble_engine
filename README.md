@@ -5,9 +5,11 @@ PyTorch value network that learns by self-play to judge the position each candid
 behind.
 
 **Status (November 2026).** The engine, the baseline bots, the training pipeline and a desktop
-app to run it all are written and tested. No network has been trained yet beyond smoke tests of
-a minute or two, so there is no strength result for the network to report. What is measured so
-far is in [Results](#results-so-far).
+app to run it all are written and tested. **No network has beaten the greedy + leave values bot
+yet.** The first two training runs (about 450,000 games each) memorised their own games and got
+worse as they trained; the training defaults were changed in response and have not yet been
+tried in a full run. [docs/PLAN.md](docs/PLAN.md) has the numbers, and what is measured so far is
+in [Results](#results-so-far).
 
 This is a rewrite. The first version of this project (Keras, 2025) is in [`legacy/`](legacy/) for
 reference; it did not learn, for reasons set out in [docs/legacy-audit.md](docs/legacy-audit.md).
@@ -63,6 +65,15 @@ All measured on a Ryzen 7 7800X3D and an RTX 5070 Ti with the NASPA School Word 
 | Self-play with the default network (6 x 64) | 103,000 positions scored per second, about 58 games per second with training running |
 | Training, default network | 46,000 positions per second |
 
+**Network strength** (the first two runs, 13 November 2026; spread against greedy + leave values, 250 pairs)
+
+| Run | Games | First evaluation | Last evaluation |
+|---|---|---|---|
+| 6 x 64, 2.2 hours | 450,005 | -3.2 ± 7.3 | -44.7 ± 8.2 |
+| 10 x 128, 6.7 hours | 441,805 | -7.7 ± 6.9 | -82.1 ± 8.3 |
+
+Both got worse as they trained. [docs/PLAN.md](docs/PLAN.md) explains why and what changed.
+
 For comparison, the 2025 move generator took a median of 1.4 seconds per position and missed
 8.6% of the legal placements.
 
@@ -101,8 +112,8 @@ uv run scrabble-ai bench
 ```
 
 [docs/TRAINING.md](docs/TRAINING.md) covers starting, watching, stopping and resuming a run from
-the command line, [docs/APP.md](docs/APP.md) does the same for the app, and every setting is
-explained in [configs/train.toml](configs/train.toml).
+the command line, [docs/APP.md](docs/APP.md) does the same for the app, and
+[docs/TUNING.md](docs/TUNING.md) says what every setting does and what changing it does.
 
 The app is a web page served on 127.0.0.1 by the Python standard library and shown in its own
 window (on Windows a see-through glass one); it needs nothing beyond what `uv sync` installs, and

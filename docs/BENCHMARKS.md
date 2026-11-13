@@ -158,6 +158,18 @@ uv run scrabble-ai train --config configs/train.toml --name dryrun --hours 0.085
 At 58 games a second, an 8-hour run is about 1.7 million games. That is an extrapolation from
 four minutes.
 
+The first two full runs (13 November 2026, started from the app, replay ratio 4, batch 2,048)
+give whole-run figures from their own logs:
+
+| Network | Games | Time | Overall | Median report |
+|---|---|---|---|---|
+| 6 x 64 | 450,005 | 2.19 h | 57 games/s | 61.7 games/s |
+| 10 x 128 | 441,805 | 6.67 h | 18 games/s | 18.8 games/s |
+
+The overall figure includes evaluations and checkpoints. The defaults have since changed to a
+replay ratio of 1 and batches of 1,024 ([PLAN.md](PLAN.md)); speeds with those have not been
+measured in a full run.
+
 For the record, the end-of-run evaluation of that five-minute network was +4.2 ± 7.8 points a
 game against greedy-leave (150 pairs), which is indistinguishable from zero, as expected: with the
 leave baseline an untrained network plays like greedy-leave.

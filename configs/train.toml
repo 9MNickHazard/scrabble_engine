@@ -57,25 +57,35 @@ win_scale = 100.0       # points that certain victory is worth in that blend
 games = 100000          # games played by the static evaluator before the network plays (0 = skip)
 temperature = 6.0       # exploration in those games, so the network also sees poor moves
 max_candidates = 16
-steps = 3000            # training steps on that data before self-play starts
+steps = 2000            # training steps on that data before self-play starts. 100,000 games are
+                        # about 2.4 million positions, so one pass is about 2,300 steps of 1,024;
+                        # past that, positions repeat and their outcomes start to be memorised.
 
+# The defaults in this section changed on 2026-11-13 after the first two real runs (docs/PLAN.md):
+# with replay_ratio 4, Monte Carlo targets and learning rate 1e-3 both networks memorised the
+# outcomes of the games in the replay buffer and played far worse than they started.
 [train]
-batch_size = 2048
-learning_rate = 1e-3
+batch_size = 1024
+learning_rate = 3e-4    # raise towards 1e-3 only if a run is stable and learning slowly
 warmup_steps = 500      # linear learning-rate warm-up
 weight_decay = 1e-4
 grad_clip = 1.0         # maximum gradient norm; 0 = off
 value_scale = 50.0      # points per unit of the value output
 huber_delta = 2.0       # the value loss is quadratic within this many units (100 points) and linear beyond
 win_loss_weight = 0.5   # weight of the win-probability loss relative to the value loss
-td_lambda = 1.0         # 1 = Monte Carlo targets: the spread actually gained from each position on.
-                        # Below 1, targets lean on the network's own estimate of the next position,
-                        # which lowers their noise and adds bias. Start at 1; try 0.8-0.9 later.
+td_lambda = 0.7         # 1 = Monte Carlo targets: the spread actually gained from each position on,
+                        # whose noise (about 75 points) is what the networks memorised. Below 1,
+                        # targets lean on the estimate of the next position instead: far less noise,
+                        # some bias. 0.5 to 0.8 is the range to try.
 replay_capacity = 3000000  # positions kept, about 310 bytes each (3M = 0.9 GB of RAM)
 min_replay = 100000     # positions needed before training starts
-replay_ratio = 4.0      # training samples drawn per new self-play position. Higher = more learning
-                        # from each game, slower self-play, more risk of overfitting old data.
-actor_sync_steps = 250  # training steps between copies of the weights into the self-play network
+replay_ratio = 1.0      # training samples drawn per new self-play position. At 1 each position is
+                        # trained on about once. Above 1 the network sees the same games repeatedly
+                        # and starts to memorise their outcomes (at 4 it did, badly).
+actor_sync_steps = 100  # training steps between copies of the weights into the self-play network
+guard = true            # when a network is significantly behind the best one at guard_patience
+guard_patience = 2      # evaluations in a row, go back to the best network's weights and halve the
+                        # learning rate. A run can then waste time but cannot drift far below its best.
 augment_transpose = true   # randomly swap rows and columns: the one exact symmetry of the board
 amp = true              # bf16 mixed precision
 checkpoint_minutes = 10.0

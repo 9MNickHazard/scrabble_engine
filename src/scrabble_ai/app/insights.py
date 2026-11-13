@@ -62,6 +62,16 @@ SLOW_MIN_RECORDS = 3
 SLOW_MIN_HISTORY = 6
 MAX_SLOWDOWN_EVENTS = 3
 
+# Edge: leave-only RMSE minus the network's RMSE on the self-play games of one report, which the
+# network has not trained on yet. Above zero the network predicts new games better than leave
+# values alone. Health reports the mean of the last EDGE_REPORTS reports. The "overfit" event is
+# the first time the mean of OVERFIT_WINDOW consecutive reports is below -OVERFIT_MARGIN: each
+# report covers thousands of positions scored by both predictors, so half a point over ten
+# reports is far outside noise, and an untrained network sits at zero (its correction is zero).
+EDGE_REPORTS = 10
+OVERFIT_WINDOW = 10
+OVERFIT_MARGIN = 0.5
+
 # Promotions: more than this many become first, one summary, last.
 MAX_PROMOTION_EVENTS = 8
 
@@ -419,12 +429,94 @@ def _summary(run: _Run) -> dict:
         "promotions": sum(flags) if flags else None,
         "value_rmse_gain": _round(_value_rmse_gain(run)),
         "evaluations": len(base),
+        "health": _health(run),
     }
 
 
 _EMPTY_SUMMARY = {"games": None, "hours": None, "steps": None, "mean_games_per_second": None, "best": None,
                   "final": None, "first_significant": None, "promotions": None, "value_rmse_gain": None,
-                  "evaluations": 0}
+                  "evaluations": 0, "health": None}
+
+
+# ---- health ----------------------------------------------------------------------------------
+
+
+def _edges(run: _Run) -> list[tuple[int, float, float, float]]:
+    """(record index, edge, network RMSE, leave-only RMSE) for each self-play report with both."""
+    out = []
+    for i in run.indices("selfplay"):
+        value = _num(run.recs[i].get("value_rmse_points"))
+        leave = _num(run.recs[i].get("leave_only_rmse_points"))
+        if value is not None and leave is not None:
+            out.append((i, leave - value, value, leave))
+    return out
+
+
+def _edge(run: _Run) -> float | None:
+    edges = [e[1] for e in _edges(run)[-EDGE_REPORTS:]]
+    return float(np.mean(edges)) if edges else None
+
+
+def _declined(best: _Eval | None, final: _Eval | None) -> bool:
+    """The latest evaluation is significantly below an earlier best: the same test as a regression
+    between two evaluations. (The best of many evaluations is a little lucky, which the factor
+    above 1 allows for.)"""
+    return (best is not None and final is not None and best.index < final.index
+            and best.ci is not None and final.ci is not None
+            and best.spread - final.spread > REGRESSION_FACTOR * math.hypot(best.ci, final.ci))
+
+
+def _health(run: _Run) -> dict | None:
+    """How training went, in one word and one or two sentences. None before the first evaluation
+    against greedy-leave."""
+    base = run.baseline
+    if not base:
+        return None
+    best, final = _best(base), base[-1]
+    edge = _edge(run)
+    declined = _declined(best, final)
+    if final.above:
+        state = "ahead"
+        note = f"Ahead of greedy-leave: {final.figure()} points a game at the latest evaluation."
+        if declined:
+            note += f" It was further ahead earlier ({best.figure()} at {_count(best.pos.games)} games)."
+    elif declined:
+        state = "worse"
+        note = (f"It got worse as it trained: {final.figure()} points a game against greedy-leave at the latest "
+                f"evaluation, down from {best.figure()} at {_count(best.pos.games)} games.")
+        if any(g.first for g in run.gates) and not any(g.promoted and not g.first for g in run.gates):
+            note += " Its best network is still the first one evaluated."
+    elif final.below:
+        state = "behind"
+        note = f"Behind greedy-leave: {final.figure()} points a game at the latest evaluation."
+    else:
+        state = "level"
+        note = f"Level with greedy-leave: {final.figure()} points a game at the latest evaluation"
+        note += ", an interval that includes zero." if final.ci is not None else "."
+    if edge is not None and edge < -OVERFIT_MARGIN and state != "ahead":
+        note += (f" On games it has not trained on, its predictions are {-edge:.1f} points of RMSE worse than "
+                 f"leave values alone, as they are when a network memorises its training games.")
+    return {"state": state, "edge": _round(edge, 2), "note": note}
+
+
+def run_overview(records: Any) -> dict:
+    """What the run summary shows about how training went: `trend` (every evaluation against
+    greedy-leave, oldest first, as parallel arrays), `best_eval` and `health`. Never raises."""
+    empty = {"trend": {"games": [], "spread": [], "ci": []}, "best_eval": None, "health": None}
+    try:
+        with np.errstate(all="ignore"):
+            run = _Run(records, None)
+            base = run.baseline
+            best = _best(base)
+            return {
+                "trend": {"games": [_int(e.pos.games) for e in base], "spread": [_round(e.spread) for e in base],
+                          "ci": [_round(e.ci) for e in base]},
+                "best_eval": None if best is None else {"games": _int(best.pos.games), "step": _int(best.pos.step),
+                                                        "spread": _round(best.spread), "ci": _round(best.ci)},
+                "health": _health(run),
+            }
+    except Exception:
+        return empty
 
 
 # ---- headline --------------------------------------------------------------------------------
@@ -451,6 +543,10 @@ def _headline(name: str, run: _Run) -> str:
             return (f"{name} is now significantly worse than greedy-leave, {final.figure()} points a game at its "
                     f"latest evaluation, although it was significantly better earlier ({won.figure()} at "
                     f"{_count(won.pos.games)} games).")
+        if _declined(best, final):
+            return (f"{name} got worse as it trained: its latest evaluation against greedy-leave is {final.figure()} "
+                    f"points a game, down from {best.figure()} at {_count(best.pos.games)} games. It was never shown "
+                    f"to beat greedy-leave.")
         text = f"{name} is significantly worse than greedy-leave: {final.figure()} points a game at its latest evaluation."
         if best is not None and best is not final:
             if best.spread < 0:
@@ -744,6 +840,38 @@ def _slowdown_events(run: _Run) -> list[dict]:
     return out
 
 
+def _overfit_events(run: _Run) -> list[dict]:
+    """The first time the network predicts new games worse than leave values alone, over a window
+    of reports. Once is enough: the health line says whether it is still so."""
+    edges = _edges(run)
+    for k in range(OVERFIT_WINDOW, len(edges) + 1):
+        window = edges[k - OVERFIT_WINDOW:k]
+        if float(np.mean([e[1] for e in window])) < -OVERFIT_MARGIN:
+            value, leave = float(np.mean([e[2] for e in window])), float(np.mean([e[3] for e in window]))
+            return [_event(run, window[-1][0], "overfit", "warning", "Predicting new games worse than leave values alone",
+                           f"Over {OVERFIT_WINDOW} self-play reports the network's error on games it had not trained on "
+                           f"averaged {value:.1f} points of RMSE, against {leave:.1f} for leave values alone. A network "
+                           f"that fits the games it trained on but not new ones is memorising them.")]
+    return []
+
+
+def _guard_events(run: _Run) -> list[dict]:
+    out = []
+    for i in run.indices("guard"):
+        r = run.recs[i]
+        to_step, scale, reason = _num(r.get("to_step")), _num(r.get("learning_rate_scale")), _text(r.get("reason"))
+        detail = "Training had made the network worse, so the trainer went back to its best network"
+        if to_step is not None:
+            detail += f" (step {_count(to_step)})"
+        if scale is not None and scale > 0:
+            detail += f" and lowered the learning rate to {scale:.3g} times its setting"
+        detail += "."
+        if reason:
+            detail += f" {reason[0].upper()}{reason[1:]}."
+        out.append(_event(run, i, "guard", "warning", "Guard went back to the best network", detail))
+    return out
+
+
 def _record_events(run: _Run) -> list[dict]:
     """The run's overall highest game score and single play in self-play, each once, where it
     happened. Every per-report new high would mostly be noise early in a run."""
@@ -779,7 +907,7 @@ def _stop_events(run: _Run) -> list[dict]:
 
 
 _DETECTORS = (_phase_events, _significance_events, _promotion_events, _regression_events, _plateau_events,
-              _loss_events, _slowdown_events, _record_events, _stop_events)
+              _loss_events, _slowdown_events, _overfit_events, _guard_events, _record_events, _stop_events)
 
 
 # ---- public: run report ----------------------------------------------------------------------

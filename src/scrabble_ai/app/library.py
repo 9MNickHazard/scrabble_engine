@@ -102,6 +102,19 @@ class Library:
             if len(kept) != len(meta):
                 self._write(kept)
 
+    def rename_run(self, old: str, new: str) -> None:
+        """Carry the stars and notes of a renamed run's models over to its new name: every
+        `<old>/<file>` becomes `<new>/<file>` (the run compared without regard to case, as in
+        `forget_run`). They replace any left behind under the new name by a run long gone."""
+        with self.lock:
+            meta = self._meta()
+            moved = {f"{new}/{model_id.partition('/')[2]}": entry for model_id, entry in meta.items()
+                     if model_id.partition("/")[0].lower() == old.lower()}
+            if moved:
+                kept = {model_id: entry for model_id, entry in meta.items()
+                        if model_id.partition("/")[0].lower() != old.lower()}
+                self._write({**kept, **moved})
+
     def _write(self, meta: dict) -> None:
         self.meta_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.meta_path.with_suffix(".json.tmp")
