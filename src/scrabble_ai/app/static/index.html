@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scrabble Lab</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/board.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar" aria-label="Sections"></nav>
+    <div id="main">
+      <header id="topbar"></header>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div id="toasts" aria-live="polite"></div>
+  <div id="modal-root"></div>
+
+  <!-- Core, then shared components, then one file per view. Plain scripts, no build step. -->
+  <script src="js/app.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/board.js"></script>
+  <script src="js/views/overview.js"></script>
+  <script src="js/views/training.js"></script>
+  <script src="js/views/run.js"></script>
+  <script src="js/views/models.js"></script>
+  <script src="js/views/play.js"></script>
+  <script src="js/views/watch.js"></script>
+  <script src="js/views/arena.js"></script>
+  <script>App.start();</script>
+</body>
+</html>

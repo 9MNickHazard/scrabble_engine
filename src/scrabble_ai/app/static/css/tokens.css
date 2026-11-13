@@ -1,0 +1,153 @@
+/* Design tokens. Every colour, radius and space in the app comes from here.
+ *
+ * The app is dark by default; <html data-theme="light"> switches. Chart colours follow the
+ * validated categorical palette (fixed order, never cycled) and the reserved status colours.
+ * Text always wears a text token, never a series colour. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --page: #0d0d0d;
+  --surface-1: #1a1a19;        /* cards, chart surface */
+  --surface-2: #222220;        /* raised: inputs, hovered rows */
+  --surface-3: #2c2c2a;        /* pressed, selected */
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --overlay: rgba(0, 0, 0, 0.6);
+
+  /* Ink */
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+
+  /* Chart chrome */
+  --grid: #2c2c2a;
+  --axis: #383835;
+
+  /* Accent (interactive elements) */
+  --accent: #3987e5;
+  --accent-hover: #5598e7;
+  --accent-ink: #ffffff;
+  --accent-wash: rgba(57, 135, 229, 0.14);
+
+  /* Categorical series, in their fixed order */
+  --series-1: #3987e5;  /* blue */
+  --series-2: #d95926;  /* orange */
+  --series-3: #199e70;  /* aqua */
+  --series-4: #c98500;  /* yellow */
+  --series-5: #d55181;  /* magenta */
+  --series-6: #008300;  /* green */
+  --series-7: #9085e9;  /* violet */
+  --series-8: #e66767;  /* red */
+
+  /* Diverging (blue <-> red around a neutral) */
+  --diverge-low: #e66767;
+  --diverge-mid: #383835;
+  --diverge-high: #3987e5;
+
+  /* Status: reserved, always shown with an icon or label */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --good-wash: rgba(12, 163, 12, 0.14);
+  --warning-wash: rgba(250, 178, 25, 0.14);
+  --critical-wash: rgba(208, 59, 59, 0.16);
+
+  /* The board */
+  --board-frame: #121211;
+  --square: #25302b;            /* plain square: muted green felt */
+  --square-line: #161d1a;
+  --square-dl: #2f5f7a;         /* double letter */
+  --square-tl: #1f4f9a;         /* triple letter */
+  --square-dw: #8a4a5e;         /* double word */
+  --square-tw: #a23b2f;         /* triple word */
+  --square-label: rgba(255, 255, 255, 0.55);
+  --tile: #ecdcb0;
+  --tile-edge: #c9b684;
+  --tile-ink: #1c1a14;
+  --tile-blank-ink: #9a3b2c;    /* a blank's letter */
+  --tile-new: #ffd66b;          /* ring on tiles just placed */
+  --tile-pending: #a8d1ff;      /* tiles the user is placing */
+
+  /* Shape and rhythm */
+  --radius-s: 4px;
+  --radius-m: 8px;
+  --radius-l: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* Type */
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --text-xs: 11px;
+  --text-s: 12px;
+  --text-m: 14px;
+  --text-l: 16px;
+  --text-xl: 20px;
+  --text-hero: 48px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --surface-3: #e9e8e2;
+  --border: rgba(11, 11, 11, 0.10);
+  --border-strong: rgba(11, 11, 11, 0.20);
+  --overlay: rgba(11, 11, 11, 0.4);
+
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+
+  --accent: #2a78d6;
+  --accent-hover: #256abf;
+  --accent-ink: #ffffff;
+  --accent-wash: rgba(42, 120, 214, 0.10);
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+
+  --diverge-low: #e34948;
+  --diverge-mid: #f0efec;
+  --diverge-high: #2a78d6;
+
+  --good-wash: rgba(12, 163, 12, 0.10);
+  --warning-wash: rgba(250, 178, 25, 0.18);
+  --critical-wash: rgba(208, 59, 59, 0.10);
+
+  --board-frame: #d9d6cc;
+  --square: #dfe8e1;
+  --square-line: #c5cfc8;
+  --square-dl: #a9d3ea;
+  --square-tl: #5f97dd;
+  --square-dw: #eab4c2;
+  --square-tw: #e2796c;
+  --square-label: rgba(11, 11, 11, 0.55);
+  --tile: #f3e3b4;
+  --tile-edge: #cdb97f;
+  --tile-ink: #1c1a14;
+  --tile-blank-ink: #a3402f;
+  --tile-new: #d98a00;
+  --tile-pending: #2a78d6;
+
+  --shadow: 0 8px 24px rgba(11, 11, 11, 0.14);
+}

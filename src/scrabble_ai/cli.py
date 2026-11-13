@@ -6,6 +6,7 @@
     eval         paired match between two players (bots or saved networks)
     train        train the value network by self-play
     bench        measure the speed of the engine, self-play and training on this machine
+    app          open Scrabble Lab, the desktop app (train, watch, play, compare)
 """
 
 from __future__ import annotations
@@ -156,6 +157,19 @@ def _bench(args: argparse.Namespace) -> int:
                args.batch, args.quick, not args.no_gpu)
 
 
+def _app(args: argparse.Namespace) -> int:
+    from scrabble_ai.app.__main__ import main as app_main
+
+    arguments = []
+    if args.install_shortcut:
+        arguments.append("--install-shortcut")
+    if args.no_window:
+        arguments.append("--no-window")
+    if args.port:
+        arguments += ["--port", str(args.port)]
+    return app_main(arguments)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scrabble-ai", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -209,6 +223,12 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--quick", action="store_true", help="smaller samples: a fast sanity check, noisier numbers")
     be.add_argument("--no-gpu", action="store_true", help="engine sections only")
     be.set_defaults(func=_bench)
+
+    ap = commands.add_parser("app", help="open Scrabble Lab, the desktop app")
+    ap.add_argument("--install-shortcut", action="store_true", help="put a shortcut on the Desktop and exit")
+    ap.add_argument("--no-window", action="store_true", help="serve only and print the address")
+    ap.add_argument("--port", type=int, default=0)
+    ap.set_defaults(func=_app)
 
     args = parser.parse_args(argv)
     return args.func(args)
