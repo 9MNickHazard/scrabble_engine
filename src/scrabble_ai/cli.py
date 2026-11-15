@@ -5,6 +5,8 @@
     fit-leaves   fit leave values from self-play (needed once per lexicon, before training)
     eval         paired match between two players (bots or saved networks)
     train        train the value network by self-play
+    games        play games between static evaluators and save them, to train from
+    train-games  train a network from a set of saved games
     bench        measure the speed of the engine, self-play and training on this machine
     app          open Scrabble Lab, the desktop app (train, watch, play, compare)
 """
@@ -97,8 +99,11 @@ def _eval(args: argparse.Namespace) -> int:
         if state["leaves_hash"] != loaded.leaves_hash:
             raise SystemExit(f"{spec}: trained with different leave values than the ones loaded")
         scale = state["config"]["train"]["value_scale"]
+        own = state["config"].get("selfplay", {})
+        win_weight = own.get("win_weight", 0.0) if args.win_weight is None else args.win_weight
+        win_scale = own.get("win_scale", 100.0) if args.win_scale is None else args.win_scale
         return NetPlayer(f"{path.parent.parent.name}@{state['step']}", Scorer(net, loaded.engine, scale, device),
-                         args.win_weight, args.win_scale)
+                         win_weight, win_scale)
 
     a, b = player(args.a), player(args.b)
     start = time.time()
@@ -157,6 +162,77 @@ def _bench(args: argparse.Namespace) -> int:
                args.batch, args.quick, not args.no_gpu, args.inputs)
 
 
+def _games(args: argparse.Namespace) -> int:
+    from scrabble_ai import engine as engine_module
+    from scrabble_ai import games as games_module
+
+    try:
+        loaded = engine_module.load(args.lexicon, args.leaves)
+        directory = games_module.set_dir(args.name, Path(args.dir) if args.dir else None)
+        meta = games_module.generate(loaded, directory, args.games, opening_plies=args.opening_plies,
+                                     opening_temperature=args.opening_temperature)
+    except (games_module.GamesError, FileNotFoundError) as error:
+        raise SystemExit(f"error: {error}") from None
+    print(f"{meta['name']}: {meta['games']:,} games, {meta['bytes'] / 2**20:,.0f} MB, in {directory}")
+    return 0
+
+
+def _train_games(args: argparse.Namespace) -> int:
+    from scrabble_ai import games as games_module
+    from scrabble_ai.config import OFFLINE_DEFAULTS, Config, ConfigError, apply_dict, apply_overrides, load_config
+    from scrabble_ai.lexicon import REPO_ROOT
+    from scrabble_ai.offline import GameTrainer
+    from scrabble_ai.train import load_checkpoint_config, resolve_resume
+
+    overrides = list(args.set or [])
+    if args.name:
+        overrides.append(f"run.name={args.name}")
+    if args.hours is not None:
+        overrides.append(f"run.hours={args.hours}")
+    if args.games:
+        overrides.append(f"offline.games={args.games}")
+
+    def games_defaults() -> list[str]:
+        """What this way of training changes in the other sections (`OFFLINE_DEFAULTS`), as
+        overrides that come before the user's own. A setting the config file gives a value other
+        than the built-in one is the user's choice and is left alone; `--set` outranks both."""
+        built_in = Config().to_dict()
+        in_file = load_config(Path(args.config)).to_dict() if args.config else built_in
+        chosen = {item.split("=", 1)[0].strip() for item in overrides}
+        applied = {}
+        for key, value in OFFLINE_DEFAULTS.items():
+            section, name = key.split(".")
+            if in_file[section][name] == built_in[section][name]:
+                applied[key] = str(value).lower() if isinstance(value, bool) else value
+        shown = ", ".join(f"{key}={value}" for key, value in applied.items() if key not in chosen)
+        if shown:
+            print(f"settings training from games starts from: {shown} (--set changes any of them)", flush=True)
+        return [f"{key}={value}" for key, value in applied.items()]
+
+    try:
+        resume = None
+        if args.resume:
+            where = load_config(Path(args.config) if args.config else None, overrides).run
+            out_dir = Path(where.out_dir)
+            run_dir = out_dir / where.name if out_dir.is_absolute() else REPO_ROOT / out_dir / where.name
+            resume = resolve_resume(args.resume, run_dir)
+            config = load_checkpoint_config(resume)
+            if args.config:
+                import tomllib
+
+                with open(args.config, "rb") as fh:
+                    apply_dict(config, tomllib.load(fh))
+            apply_overrides(config, overrides)
+            config.validate()
+        else:
+            config = load_config(Path(args.config) if args.config else None, games_defaults() + overrides)
+        trainer = GameTrainer(config, resume)
+    except (ConfigError, games_module.GamesError, FileNotFoundError, RuntimeError) as error:
+        raise SystemExit(f"error: {error}") from None
+    trainer.run()
+    return 0
+
+
 def _app(args: argparse.Namespace) -> int:
     from scrabble_ai.app.__main__ import main as app_main
 
@@ -199,8 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--leaves", default="", help='leave-value file, or "zero"')
     ev.add_argument("--candidates", type=int, default=64, help="moves per decision a network evaluates")
     ev.add_argument("--exchanges", type=int, default=4)
-    ev.add_argument("--win-weight", type=float, default=0.0, help="0 = networks choose by spread, 1 = by win probability")
-    ev.add_argument("--win-scale", type=float, default=100.0)
+    ev.add_argument("--win-weight", type=float, default=None,
+                    help="0 = networks choose by spread, 1 = by win probability (default: as each network was trained)")
+    ev.add_argument("--win-scale", type=float, default=None)
     ev.add_argument("--device", default="cuda")
     ev.set_defaults(func=_eval)
 
@@ -211,6 +288,27 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--hours", type=float, default=None, help="stop after this many hours (same as --set run.hours=...)")
     tr.add_argument("--resume", default="", help='"latest" to continue runs/<name>/, or a checkpoint file')
     tr.set_defaults(func=_train)
+
+    ga = commands.add_parser("games", help="play and save games between static evaluators, to train from")
+    ga.add_argument("--name", required=True, help="name of the game set (a folder under data/games)")
+    ga.add_argument("--games", type=int, required=True, help="how many games the set should hold; an existing set is topped up")
+    ga.add_argument("--opening-plies", type=int, default=None, help="vary up to this many first plies of each game (default 4)")
+    ga.add_argument("--opening-temperature", type=float, default=None, help="how freely, in points (default 6)")
+    ga.add_argument("--dir", default="", help="folder that holds game sets (default: data/games)")
+    ga.add_argument("--lexicon", default="")
+    ga.add_argument("--leaves", default="")
+    ga.set_defaults(func=_games)
+
+    tg = commands.add_parser("train-games", help="train a network from a set of saved games")
+    tg.add_argument("--games", default="", help="the game set to learn from (sets offline.games)")
+    tg.add_argument("--config", default="", help="TOML file of settings. The few settings this way of training starts "
+                    "from other values for (printed at the start) follow the file only where it changes them from the "
+                    "built-in value; --set always counts")
+    tg.add_argument("--name", default="", help="run name: outputs go to runs/<name>/")
+    tg.add_argument("--hours", type=float, default=None, help="stop after this many hours (0 = run all the passes)")
+    tg.add_argument("--resume", default="", help="'latest' or a checkpoint file of this run")
+    tg.add_argument("--set", action="append", metavar="section.key=value", help="change one setting; may be repeated")
+    tg.set_defaults(func=_train_games)
 
     be = commands.add_parser("bench", help="measure engine, self-play and training speed")
     be.add_argument("--models", default="6x64", help="network sizes to time, e.g. 6x64,10x128")

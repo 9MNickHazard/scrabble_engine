@@ -27,7 +27,8 @@ pytest_plugins = ["app_fixtures"]
 
 SUMMARY_KEYS = {"name", "status", "phase", "network", "parameters", "games", "step", "positions", "hours",
                 "games_per_second", "created", "updated", "limit", "progress", "latest_eval", "best_step", "has_best",
-                "checkpoints", "changed", "error", "trend", "best_eval", "health"}
+                "checkpoints", "changed", "error", "trend", "best_eval", "health",
+                "mode", "game_set", "total_steps", "passes", "pass", "positions_per_second"}
 STATE_KEYS = {"id", "seed", "players", "advisor", "board", "last_placed", "racks", "scores", "to_move", "turn", "bag",
               "scoreless_turns", "can_exchange", "unseen", "unseen_by_seat", "over", "result", "history"}
 CANDIDATE_KEYS = {"text", "kind", "word", "position", "score", "tiles", "leave", "exchanged", "leave_value", "value",
@@ -158,8 +159,8 @@ def test_gpu_reads_nvidia_smi_and_caches_it(monkeypatch, trained, tmp_path):
 
 def test_config_schema(app):
     data = ok(app, "GET", "/api/config/schema")
-    assert set(data) == {"sections", "presets", "speed"}
-    assert [s["name"] for s in data["sections"]] == ["run", "model", "selfplay", "warmstart", "train"]
+    assert set(data) == {"sections", "presets", "speed", "games_presets", "games_defaults"}
+    assert [s["name"] for s in data["sections"]] == ["run", "model", "selfplay", "warmstart", "train", "offline"]
 
 
 def test_runs_list_and_detail(app):
@@ -167,7 +168,7 @@ def test_runs_list_and_detail(app):
     assert [r["name"] for r in runs] == [TINY_RUN] and set(runs[0]) == SUMMARY_KEYS
     detail = ok(app, "GET", f"/api/runs/{TINY_RUN}")
     assert set(detail) == {"run", "config", "checkpoints", "best"}
-    assert set(detail["config"]) == {"run", "model", "selfplay", "warmstart", "train"}
+    assert set(detail["config"]) == {"run", "model", "selfplay", "warmstart", "train", "offline"}
     assert {k: detail["best"][k] for k in ("file", "step", "model_id")} == {
         "file": "best.pt", "step": app.trained.best_step, "model_id": f"{TINY_RUN}/best.pt"}
     assert detail["best"]["size_bytes"] > 0 and detail["best"]["modified"] > 0

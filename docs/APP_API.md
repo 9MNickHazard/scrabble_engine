@@ -91,7 +91,7 @@ Everything the "new run" form needs.
   separate measurements, so label those "estimated". For a size not in the list, interpolate
   nothing: say "not measured".
 - Sections, in order: `run` (name, time limit, game limit), `model`, `selfplay`, `warmstart`,
-  `train`.
+  `train`, `offline` (training from games, below).
 
 ## Runs
 
@@ -136,7 +136,8 @@ the app window is closed, and the app finds them again when it opens.
 - `status`: `queued` (waiting behind another run), `running`, `stopping` (STOP requested),
   `finished` (reached its limit), `stopped` (stopped by the user or interrupted), `failed`
   (the process died; `error` has the last lines of its log).
-- `phase`: `warmstart`, `pretraining` or `selfplay`. `null` when not started.
+- `phase`: `warmstart`, `pretraining` or `selfplay`; for a run that trains from games,
+  `training`. `null` when not started.
 - `progress`: 0 to 1 against the time or game limit while the run is going, 1 when it has
   finished, `null` if it has no limit or is queued, stopped or failed.
 - `latest_eval` is `null` before the first evaluation. `ci` is the half-width of the 95% interval.
@@ -296,6 +297,159 @@ Analysis of a run so far, for the post-training page (and usable mid-run).
 - More event kinds: `overfit` (the network began predicting unseen games worse than leave values
   alone) and `guard` (the trainer went back to its best network and lowered the learning rate).
 - `summary.health` is the same object as the run summary's `health`.
+
+## Training from saved games
+
+The second way to train (`scrabble-ai train-games`, `src/scrabble_ai/offline.py`): first a **game
+set** is made, a folder of games the static evaluator played against itself; then a run learns
+from it, one position from every game per pass. Such a run is an ordinary run in `runs/`, started,
+stopped, resumed, renamed and deleted through the endpoints above. What tells the two kinds apart
+is its `mode`.
+
+### `GET /api/gamesets`
+
+```json
+{
+  "sets": [
+    {"name": "twenty-million", "status": "building", "games": 6200000, "target": 20000000, "progress": 0.31,
+     "bytes": 1773200000, "lexicon_id": "NSWL2023-91a67230e1f6", "leaves_hash": "ab12...",
+     "opening_plies": 4, "opening_temperature": 6.0,
+     "mean_turns": 23.0, "mean_score": 432.0, "first_player_win_rate": 0.554, "bingos_per_game": 3.94,
+     "games_per_second": 1040.0, "seconds": 5961.5, "created": 1794700000.0, "updated": 1794705961.5,
+     "error": null}
+  ],
+  "estimate": {"bytes_per_game": 286.0, "games_per_second": 1040.0}
+}
+```
+
+- `status`: `building` (a process is adding games), `stopping` (it has been asked to stop and
+  will after its current block of 5,000 games), `complete` (it holds its `target`), `partial`
+  (stopped short of it; `POST` again with the same or a larger number to carry on), `empty`,
+  or `failed` (the process died; `error` holds the end of its log).
+- `progress` is `games / target`, or `null` with no target.
+- The statistics (`mean_turns` to `games_per_second`) are `null` until the set has games.
+  `mean_score` is per player; `bingos_per_game` counts both players' together.
+  `lexicon_id` and `leaves_hash` are `null` until the process is up (it records them before
+  its first block, so they can be set while `games` is still 0).
+- `estimate` is for sizing a set before it is made: bytes on disk per game, from the sets that
+  exist (286, measured, if there are none), and games per second from the most recent set, or
+  `null` if no set has been timed. Building uses every CPU core and no GPU.
+- Sets are listed building first, then the most recently updated.
+
+### `POST /api/gamesets`
+
+Body `{"name": "twenty-million", "games": 20000000, "opening_plies": 4, "opening_temperature": 6.0}`.
+Creates the set and starts playing, or, for a set that exists, carries on up to `games` (which
+must be more than it has). The two opening settings are optional (4 and 6.0 for a new set) and
+cannot differ from an existing set's. Returns the set's summary. 400 for a bad name (letters,
+digits, `-` and `_`, at most 64), a number of games outside 1 to 500,000,000, a set that is
+already being built, or leave values not yet fitted.
+
+`opening_plies`: each game varies between 0 and this many of its first plies (so half of this on
+average); on those plies the move is drawn from the best 16 by score + leave value.
+`opening_temperature`: how freely, in points: a move this many points worse is chosen about a
+third as often. After the opening every move is the static evaluator's first choice.
+
+### `GET /api/gamesets/<name>`, `GET /api/gamesets/<name>/log?tail=<n>`
+
+The set's summary; the last lines of the output of the processes that built it, `{"lines": [...]}`.
+404 for a set that does not exist, as for every route that names a set (also a name that could
+not be one).
+
+### `POST /api/gamesets/<name>/stop`
+
+Body `{}` or `{"force": true}`. Asks the process to stop after its current block (nothing is
+lost, and the set can be carried on later); with `force`, kills it (the set keeps what was
+complete). 400 if the set is not being built.
+
+### `DELETE /api/gamesets/<name>`
+
+Deletes the folder. 400 while it is being built, or while a run that is running, stopping or
+queued is training from it.
+
+### Runs that train from games
+
+Start one with `POST /api/runs` as usual; what makes it this kind is the override
+`"offline.games": "<set name>"`. The server then applies `games_defaults` from the schema before
+the run's own overrides, as `scrabble-ai train-games` does. 400 if the set does not exist, has
+no games, or is still being built. Runs of both kinds can be queued together: both use the GPU.
+
+The run summary gains, for every run:
+
+```json
+"mode": "games",
+"game_set": "twenty-million",
+"total_steps": 58500,
+"passes": 6.0,
+"pass": 2.14,
+"positions_per_second": 41250.0
+```
+
+- `mode` is `"selfplay"` or `"games"`. The other five are `null` for a self-play run.
+- `total_steps` is `null` until the run has started; `pass` is how many passes through the set
+  are done, as a fraction. `step` is the training step and `games` (and `positions`) count the
+  positions trained on, one from a game each. `progress` is `step / total_steps`.
+- `latest_eval` entries, for runs of both kinds, also carry `"win_ci"` (the half-width of the 95%
+  interval on `win_rate`, or `null` in runs from before it was recorded).
+- A games run is **judged by its win rate**, not its spread: a network trained to win takes moves
+  that score a little less and win a little more. So for these runs `health.state` is `ahead`
+  when the latest win rate's whole interval is above 0.5, `behind` when it is below, `level`
+  otherwise, and `worse` when it is significantly below the run's best and not ahead; `health.edge`
+  is always `null`. `trend` has three more parallel arrays, `step`, `win_rate` and `win_ci`, and
+  `best_eval` is the match with the highest win rate:
+  `{"games", "step", "hours", "win_rate", "win_ci", "spread", "ci", "pairs"}`.
+- Resume takes `hours` and `overrides`; `max_games` has no meaning for these runs. `offline.games`,
+  `offline.batch_size` and `offline.validation_games` cannot change on resume (they decide which
+  games each step trains on and which are held out; the schema marks them `locked_on_resume`),
+  and a run cannot be resumed if its game set has changed size since.
+- A games run that died has, like any other, a last event `Run ended unexpectedly` in its report.
+
+Metrics records of a games run (`GET /api/runs/<name>/metrics`), all with the common fields:
+
+| `kind` | Fields |
+|---|---|
+| `session` | `event`: `start` (with `mode: "games"`, `parameters`, `limit_hours`, `game_set`, `train_games`, `validation_games`, `total_steps`, `steps_per_pass`, `batch`) or `stop` (with `reason`, `finished`) |
+| `train` | About once a minute: `loss`, `win_loss`, `spread_loss`, and with helper outputs `next_score_loss`, `next_bingo_loss`, `next_squares_loss`; the weights in force, `spread_weight` and with helper outputs `next_score_weight`, `next_bingo_weight`, `next_squares_weight`; `learning_rate`, `positions_per_second`, `pass` |
+| `valid` | Every `offline.validate_steps` steps, on positions from games never trained on: the same `*_loss` fields, `win_accuracy` (share of positions whose most likely result was the actual one), `win_brier`, `value_rmse_points`, `leave_only_rmse_points`, `positions_checked` |
+| `eval` | A match against the static evaluator: `opponent` (`greedy-leave`), `spread`, `spread_ci`, `win_rate`, `win_ci`, `score_for`, `score_against`, `pairs` |
+| `best` | The match just logged was the best so far and its network was saved as `best.pt`: `win_rate`, `win_ci`, `pairs` |
+| `checkpoint` | `file` |
+
+`GET /api/runs/<name>/report` for a games run has the same three parts in other terms:
+
+```json
+{
+  "headline": "night5 wins 53.4% +/- 1.3 of games against the static evaluator, more than half beyond the margin of error.",
+  "summary": {
+    "steps": 58500, "positions": 119808000, "hours": 5.4, "passes": 6.0, "game_set": "twenty-million",
+    "train_games": 19980000, "mean_positions_per_second": 40100.0,
+    "best": {"games": 99840000, "step": 48750, "hours": 4.5, "win_rate": 0.5361, "win_ci": 0.013, "spread": 2.1, "ci": 5.2, "pairs": 2000},
+    "final": {"...": "the same fields"},
+    "first_significant": null,
+    "held_out": {"win_loss": 0.6521, "win_accuracy": 0.612, "value_rmse_points": 71.3, "leave_only_rmse_points": 73.9},
+    "evaluations": 11,
+    "health": {"state": "ahead", "edge": null, "note": "..."}
+  },
+  "events": [{"games": 0, "hours": 0.0, "kind": "phase", "tone": "info", "title": "Training began", "detail": "..."}]
+}
+```
+
+`best`, `final` and `first_significant` are `null` when there is none; `held_out` is `null` before
+the first check. Event kinds are `phase`, `significant`, `promotion` and `stop`.
+
+The schema (`GET /api/config/schema`) describes both kinds of run:
+
+- Every field has `"modes"`, a list holding `"selfplay"`, `"games"` or both: which form shows it.
+- There is a sixth section, `offline` ("Training from games").
+- `"games_presets"`: starting points for a games run, each `{name, description, overrides}`.
+- `"games_defaults"`: the settings a games run changes before its own overrides (for example
+  `"model.head": "pooled"`), so that the form can show the defaults that will really apply.
+- New `[model]` settings choose the network: `model.kind` (`cnn`, `cnn-global`, `transformer`),
+  `model.head`, `model.win_head`, `model.aux_heads`. `train.target` (`td` or `q`) chooses the
+  learning rule of a self-play run; `q` is deep Q-learning.
+
+A candidate object (below) may carry `"utility"`: for a network that picks moves by win chance,
+the number it ranks them by. Candidates are then listed in that order, not by `total`.
 
 ## Model library
 

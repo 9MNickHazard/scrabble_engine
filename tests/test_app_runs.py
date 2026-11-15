@@ -190,20 +190,27 @@ def test_latest_eval_in_both_key_layouts(manager, dirs):
     runs_dir, _ = dirs
     make_run(runs_dir, "new", records=[evaluation(1, 100, "greedy-leave", 1.0), evaluation(2, 100, "greedy", 30.0),
                                        evaluation(3, 200, "greedy-leave", 4.0), evaluation(4, 200, "greedy", 40.0)])
+    # `win_ci` is null for records written before it was logged.
     assert manager.summary("new")["latest_eval"] == {
-        "games": 200, "greedy-leave": {"spread": 4.0, "ci": 2.0, "win_rate": 0.6},
-        "greedy": {"spread": 40.0, "ci": 2.0, "win_rate": 0.6}}
+        "games": 200, "greedy-leave": {"spread": 4.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None},
+        "greedy": {"spread": 40.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None}}
     make_run(runs_dir, "old", records=[evaluation(1, 100, "greedy-leave", 1.5, old=True),
                                        evaluation(2, 100, "greedy", 31.0, old=True)])
     assert manager.summary("old")["latest_eval"] == {
-        "games": 100, "greedy-leave": {"spread": 1.5, "ci": 2.0, "win_rate": 0.6},
-        "greedy": {"spread": 31.0, "ci": 2.0, "win_rate": 0.6}}
+        "games": 100, "greedy-leave": {"spread": 1.5, "ci": 2.0, "win_rate": 0.6, "win_ci": None},
+        "greedy": {"spread": 31.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None}}
     make_run(runs_dir, "none", records=[record("train", 1, loss=1.0)])
     assert manager.summary("none")["latest_eval"] is None
     # The newest evaluation only covered greedy-leave: the older greedy figure is not carried over.
     make_run(runs_dir, "partial", records=[evaluation(1, 100, "greedy-leave", 1.0), evaluation(2, 100, "greedy", 30.0),
                                            evaluation(3, 200, "greedy-leave", 4.0)])
-    assert manager.summary("partial")["latest_eval"] == {"games": 200, "greedy-leave": {"spread": 4.0, "ci": 2.0, "win_rate": 0.6}}
+    assert manager.summary("partial")["latest_eval"] == {
+        "games": 200, "greedy-leave": {"spread": 4.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None}}
+    # With the interval on the win rate recorded, it is passed on.
+    make_run(runs_dir, "withci", records=[record("eval", 1, games=300, opponent="greedy-leave", spread=2.5, spread_ci=1.5,
+                                                 win_rate=0.55, win_ci=0.04, pairs=10)])
+    assert manager.summary("withci")["latest_eval"] == {
+        "games": 300, "greedy-leave": {"spread": 2.5, "ci": 1.5, "win_rate": 0.55, "win_ci": 0.04}}
 
 
 def test_latest_eval_after_the_game_counter_went_back(manager, dirs):
@@ -216,8 +223,8 @@ def test_latest_eval_after_the_game_counter_went_back(manager, dirs):
         record("session", 4, games=900, event="start"),  # resumed from the checkpoint at 900 games
         evaluation(5, 950, "greedy-leave", 2.0), evaluation(6, 950, "greedy", 35.0)])
     assert manager.summary("r")["latest_eval"] == {
-        "games": 950, "greedy-leave": {"spread": 2.0, "ci": 2.0, "win_rate": 0.6},
-        "greedy": {"spread": 35.0, "ci": 2.0, "win_rate": 0.6}}
+        "games": 950, "greedy-leave": {"spread": 2.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None},
+        "greedy": {"spread": 35.0, "ci": 2.0, "win_rate": 0.6, "win_ci": None}}
 
 
 def test_games_per_second(manager, dirs):
@@ -276,7 +283,11 @@ def test_summary_of_the_genuine_run(manager, dirs, trained):
     summary = manager.summary(TINY_RUN)
     assert set(summary) == {"name", "status", "phase", "network", "parameters", "games", "step", "positions", "hours",
                             "games_per_second", "created", "updated", "limit", "progress", "latest_eval", "best_step",
-                            "has_best", "checkpoints", "changed", "error", "trend", "best_eval", "health"}
+                            "has_best", "checkpoints", "changed", "error", "trend", "best_eval", "health",
+                            "mode", "game_set", "total_steps", "passes", "pass", "positions_per_second"}
+    # A self-play run: the fields of a run that trains from games are all null.
+    assert summary["mode"] == "selfplay"
+    assert [summary[k] for k in ("game_set", "total_steps", "passes", "pass", "positions_per_second")] == [None] * 5
     # The tiny run's one evaluation, of two pairs: a trend of one point and a verdict on it.
     assert len(summary["trend"]["games"]) == len(summary["trend"]["spread"]) == len(summary["trend"]["ci"]) == 1
     assert summary["best_eval"]["step"] == trained.best_step and summary["best_eval"]["spread"] == summary["trend"]["spread"][0]
@@ -290,6 +301,10 @@ def test_summary_of_the_genuine_run(manager, dirs, trained):
     assert summary["limit"] == {"hours": 0.0, "max_games": 24}
     assert set(summary["latest_eval"]) == {"games", "greedy-leave", "greedy"}
     assert summary["latest_eval"]["games"] == trained.games
+    for opponent in ("greedy-leave", "greedy"):
+        entry = summary["latest_eval"][opponent]
+        assert set(entry) == {"spread", "ci", "win_rate", "win_ci"}
+        assert isinstance(entry["win_ci"], float) and entry["win_ci"] >= 0, "the trainer records the interval"
     assert summary["games_per_second"] > 0
     assert summary["created"] <= summary["updated"]
     defaults = flatten(Config().to_dict())

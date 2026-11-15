@@ -37,7 +37,8 @@ def fields(schema):
 
 
 def test_sections_in_order(schema):
-    assert [s["name"] for s in schema["sections"]] == ["run", "model", "selfplay", "warmstart", "train"]
+    assert [s["name"] for s in schema["sections"]] == ["run", "model", "selfplay", "warmstart", "train", "offline"]
+    assert schema["sections"][-1]["title"] == "Training from games"
     assert all(s["title"] for s in schema["sections"])
     for section in schema["sections"]:
         assert all(field["key"].startswith(section["name"] + ".") for field in section["fields"])
@@ -55,7 +56,9 @@ def test_each_field_describes_its_setting(fields):
         key = field["key"]
         field_type, default = known[key]
         assert set(field) == {"key", "label", "type", "default", "min", "max", "step", "multiple_of", "unit", "options",
-                              "advanced", "locked_on_resume", "help", "effects"}, key
+                              "advanced", "locked_on_resume", "help", "effects", "modes"}, key
+        assert field["modes"] and set(field["modes"]) <= {"selfplay", "games"}, key
+        assert len(field["modes"]) == len(set(field["modes"])), key
         effects = field["effects"]
         assert set(effects) == {"lower", "higher", "typical"}, key
         assert all(isinstance(text, str) for text in effects.values()), key

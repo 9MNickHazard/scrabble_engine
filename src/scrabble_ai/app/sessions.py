@@ -154,17 +154,25 @@ class GameSession:
             win_p = np.where(went_out, (spread > 0) + 0.5 * (spread == 0), win_p)
             win = [float(p) for p in win_p]
             score = np.array([d["score"] for d in descriptions], np.float64)
-            chosen = int(np.argmax(score + value))
+            # The same rule as in matches and evaluations (`selfplay.choose`): points, or for a
+            # network trained to win, mostly its win chance with points breaking ties.
+            weight, scale = getattr(scorer, "win_weight", 0.0), getattr(scorer, "win_scale", 100.0)
+            utility = (1.0 - weight) * (score + value) + weight * scale * (2.0 * win_p - 1.0)
+            chosen = int(np.argmax(utility))
         elif uses_leave:
             value = leave_value.astype(np.float64)
         else:
             value = np.zeros(count)  # greedy and random look at the score alone
-        return [self._option(i, d, value[i], win[i]) for i, d in enumerate(descriptions)], chosen
+        options = [self._option(i, d, value[i], win[i]) for i, d in enumerate(descriptions)]
+        if is_model and weight > 0:
+            for option, u in zip(options, utility):
+                option["utility"] = round(float(u), 3)  # what this network ranks by
+        return options, chosen
 
     @staticmethod
     def _public(options: list[dict], top: int, keep: int | None = None) -> list[dict]:
         """The best `top` options, plus the chosen one if it falls outside them."""
-        ranked = sorted(options, key=lambda o: (-o["total"], o["index"]))
+        ranked = sorted(options, key=lambda o: (-o.get("utility", o["total"]), o["index"]))
         shown = ranked[:top]
         if keep is not None and all(o["index"] != keep for o in shown):
             shown = shown + [o for o in ranked if o["index"] == keep]

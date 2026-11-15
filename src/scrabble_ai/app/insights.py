@@ -939,6 +939,192 @@ def run_report(name: str, records: list[dict], config: dict | None = None) -> di
     return {"headline": headline, "summary": summary, "events": events}
 
 
+# ---- runs that train from saved games ---------------------------------------------------------
+#
+# These are judged by how often they win, not by points: a network trained to win takes moves
+# that score a little less and win a little more, so its spread against the static evaluator can
+# be below zero while it wins more than half its games. A win rate is "ahead" when its whole 95%
+# interval is above one half.
+
+
+@dataclass
+class _Match:
+    index: int
+    pos: _Pos
+    win_rate: float
+    win_ci: float | None
+    spread: float | None
+    spread_ci: float | None
+    pairs: float | None
+
+    @property
+    def above(self) -> bool:
+        return self.win_ci is not None and self.win_rate - self.win_ci > 0.5
+
+    @property
+    def below(self) -> bool:
+        return self.win_ci is not None and self.win_rate + self.win_ci < 0.5
+
+    def figure(self) -> str:
+        if self.win_ci is None:
+            return f"{100 * self.win_rate:.1f}% of games"
+        return f"{100 * self.win_rate:.1f}% +/- {100 * self.win_ci:.1f} of games"
+
+
+def _matches(run: _Run) -> list[_Match]:
+    out = []
+    for i in run.indices("eval"):
+        r = run.recs[i]
+        if _text(r.get("opponent")) != BASELINE:
+            continue
+        win_rate = _num(r.get("win_rate"))
+        if win_rate is None:
+            continue
+        win_ci = _num(r.get("win_ci"))
+        out.append(_Match(i, run.pos[i], win_rate, win_ci if win_ci is not None and win_ci >= 0 else None,
+                          _num(r.get("spread")), _num(r.get("spread_ci")), _num(r.get("pairs"))))
+    return out
+
+
+def _best_match(matches: list[_Match]) -> _Match | None:
+    best = None
+    for m in matches:
+        if best is None or m.win_rate > best.win_rate:  # strict: ties keep the earliest
+            best = m
+    return best
+
+
+def _games_health(matches: list[_Match]) -> dict | None:
+    if not matches:
+        return None
+    best, final = _best_match(matches), matches[-1]
+    fell = (best is not final and best.index < final.index and best.win_ci is not None and final.win_ci is not None
+            and best.win_rate - final.win_rate > REGRESSION_FACTOR * math.hypot(best.win_ci, final.win_ci))
+    against = "against the static evaluator at the latest match"
+    if final.above:
+        state, note = "ahead", f"Wins {final.figure()} {against}: more than half, beyond the margin of error."
+        if fell:
+            note += f" It won more earlier ({best.figure()} at step {_count(best.pos.step or 0)})."
+    elif fell:
+        state = "worse"
+        note = (f"It got worse as it trained: {final.figure()} {against}, down from {best.figure()} at step "
+                f"{_count(best.pos.step or 0)}. The best network is kept.")
+    elif final.below:
+        state, note = "behind", f"Wins {final.figure()} {against}: less than half, beyond the margin of error."
+    else:
+        state, note = "level", f"Wins {final.figure()} {against}: not distinguishable from half."
+    return {"state": state, "edge": None, "note": note}
+
+
+def _match_object(m: _Match | None) -> dict | None:
+    if m is None:
+        return None
+    return {"games": _int(m.pos.games), "step": _int(m.pos.step), "hours": _round(m.pos.hours, 4), "win_rate": _round(m.win_rate, 4),
+            "win_ci": _round(m.win_ci, 4), "spread": _round(m.spread), "ci": _round(m.spread_ci), "pairs": _int(m.pairs)}
+
+
+def games_overview(records: Any) -> dict:
+    """`run_overview` for a run that trains from saved games: the same three entries, judged by
+    win rate. `trend` gains `step`, `win_rate` and `win_ci` beside the points; `best_eval` is the
+    match with the highest win rate. Never raises."""
+    empty = {"trend": {"games": [], "spread": [], "ci": [], "step": [], "win_rate": [], "win_ci": []}, "best_eval": None,
+             "health": None}
+    try:
+        with np.errstate(all="ignore"):
+            run = _Run(records, None)
+            matches = _matches(run)
+            return {
+                "trend": {"games": [_int(m.pos.games) for m in matches], "spread": [_round(m.spread) for m in matches],
+                          "ci": [_round(m.spread_ci) for m in matches], "step": [_int(m.pos.step) for m in matches],
+                          "win_rate": [_round(m.win_rate, 4) for m in matches], "win_ci": [_round(m.win_ci, 4) for m in matches]},
+                "best_eval": _match_object(_best_match(matches)),
+                "health": _games_health(matches),
+            }
+    except Exception:
+        return empty
+
+
+def games_report(name: str, records: list[dict], config: dict | None = None) -> dict:
+    """The JSON of GET /api/runs/<name>/report for a run that trains from saved games: the same
+    three parts as `run_report`, in terms of win rate. Never raises."""
+    name = str(name) if name not in (None, "") else "This run"
+    try:
+        with np.errstate(all="ignore"):
+            run = _Run(records, config)
+            matches = _matches(run)
+            best, final = _best_match(matches), matches[-1] if matches else None
+            health = _games_health(matches)
+            first = next((m for m in matches if m.above), None)
+            starts = [run.recs[i] for i in run.indices("session") if run.recs[i].get("event") == "start"]
+            rates = [v for v in (_num(run.recs[i].get("positions_per_second")) for i in run.indices("train")) if v]
+            checks = [run.recs[i] for i in run.indices("valid")]
+            steps_per_pass = next((_num(r.get("steps_per_pass")) for r in reversed(starts) if r.get("steps_per_pass")), None)
+            steps = run.peak("step")
+            summary = {
+                "steps": _int(steps),
+                "positions": _int(run.peak("positions")),
+                "hours": _round(run.peak("hours"), 4),
+                "passes": _round(steps / steps_per_pass, 2) if steps is not None and steps_per_pass else None,
+                "game_set": next((_text(r.get("game_set")) for r in reversed(starts) if r.get("game_set")), None),
+                "train_games": next((_int(r.get("train_games")) for r in reversed(starts) if r.get("train_games")), None),
+                "mean_positions_per_second": _round(float(np.mean(rates)), 1) if rates else None,
+                "best": _match_object(best),
+                "final": _match_object(final),
+                "first_significant": _match_object(first),
+                "held_out": None if not checks else {
+                    "win_loss": _round(_num(checks[-1].get("win_loss")), 4),
+                    "win_accuracy": _round(_num(checks[-1].get("win_accuracy")), 4),
+                    "value_rmse_points": _round(_num(checks[-1].get("value_rmse_points")), 2),
+                    "leave_only_rmse_points": _round(_num(checks[-1].get("leave_only_rmse_points")), 2)},
+                "evaluations": len(matches),
+                "health": health,
+            }
+            if final is None:
+                seen = run.peak("step") or 0
+                headline = (f"{name} has trained for {_count(seen)} steps and has not played the static evaluator yet."
+                            if seen else f"{name} has not reported any results yet.")
+            elif final.above:
+                headline = f"{name} wins {final.figure()} against the static evaluator, more than half beyond the margin of error."
+            elif final.below:
+                headline = f"{name} wins {final.figure()} against the static evaluator: less than half."
+            else:
+                headline = (f"{name} has not been shown to beat the static evaluator: it wins {final.figure()}, "
+                            f"which is not distinguishable from half.")
+            if final is not None and best is not final and best is not None:
+                headline += f" Its best match was {best.figure()} at step {_count(best.pos.step or 0)}."
+
+            events: list[dict] = []
+            for i in run.indices("session"):
+                r = run.recs[i]
+                if r.get("event") == "start":
+                    title = "Training began" if i == 0 else "Run resumed"
+                    detail = (f"Learning from {_count(_num(r.get('train_games')) or 0)} games of the set "
+                              f"{_text(r.get('game_set')) or '?'}, one position from each per pass.")
+                    events.append(_event(run, i, "phase", "info", title, detail))
+                elif r.get("event") == "stop":
+                    reason = _text(r.get("reason"))
+                    tone = "warning" if reason and _TROUBLE.search(reason) else "info"
+                    events.append(_event(run, i, "stop", tone, "Run finished" if _flag(r.get("finished")) else "Session stopped",
+                                         f"Stopped at step {_count(run.pos[i].step or 0)} after {_duration(run.pos[i].hours)}"
+                                         + (f": {reason}." if reason else ".")))
+            if first is not None:
+                events.append(_event(run, first.index, "significant", "good", "First win rate clearly above half",
+                                     f"{first.figure()} against the static evaluator"
+                                     + (f" over {_count(first.pairs)} pairs." if first.pairs else ".")))
+            for i in run.indices("best"):
+                rate, ci = _num(run.recs[i].get("win_rate")), _num(run.recs[i].get("win_ci"))
+                if rate is not None:
+                    figure = f"{100 * rate:.1f}%" + (f" +/- {100 * ci:.1f}" if ci is not None else "")
+                    events.append(_event(run, i, "promotion", "good", "New best network",
+                                         f"Won {figure} of games against the static evaluator, the most so far."))
+            events.sort(key=lambda e: (e["hours"], e["_order"]))
+            for e in events:
+                del e["_order"]
+            return {"headline": headline, "summary": summary, "events": events}
+    except Exception:
+        return {"headline": f"{name}: its metrics could not be summarized.", "summary": {"health": None, "evaluations": 0}, "events": []}
+
+
 # ---- matches ---------------------------------------------------------------------------------
 
 

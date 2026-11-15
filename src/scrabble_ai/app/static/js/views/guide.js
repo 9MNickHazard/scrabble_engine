@@ -1,4 +1,4 @@
-/* Tuning guide: #/guide[?from=training|run/<name>|models|overview].
+/* Tuning guide: #/guide[?from=training|games|run/<name>|models|overview].
  *
  * Every training setting in one table, grouped by section as in configs/train.toml: what it
  * does, what turning it down does, what turning it up does, the range worth trying, and its
@@ -25,6 +25,7 @@
     if (run) return { href: "#/run/" + encodeURIComponent(run[1]), label: `Back to ${run[1]}` };
     if (value === "models") return { href: "#/models", label: "Back to models" };
     if (value === "overview") return { href: "#/overview", label: "Back to the overview" };
+    if (value === "games") return { href: "#/games", label: "Back to training from games" };
     return { href: "#/training", label: "Back to training" };
   }
 

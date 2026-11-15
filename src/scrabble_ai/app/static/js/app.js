@@ -530,7 +530,7 @@ window.App = (function () {
     if (window.pywebview && window.pywebview.api) connectWindow();
     else window.addEventListener("pywebviewready", connectWindow, { once: true });
     if (mock.enabled) {
-      for (const file of ["js/mock/training.js", "js/mock/library.js", "js/mock/games.js"]) {
+      for (const file of ["js/mock/training.js", "js/mock/library.js", "js/mock/games.js", "js/mock/offline.js"]) {
         try { await loadScript(file); } catch (error) { console.warn(error.message); }
       }
     }

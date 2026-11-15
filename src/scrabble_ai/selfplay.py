@@ -54,8 +54,12 @@ class Scorer:
     PAD = 512
 
     def __init__(self, net: torch.nn.Module, engine: _core.Engine, value_scale: float, device: torch.device,
-                 amp: bool = True):
+                 amp: bool = True, win_weight: float = 0.0, win_scale: float = 100.0):
+        """`win_weight` and `win_scale` are how this network is meant to pick a move (see
+        `choose`): the settings it was trained and evaluated with. The scorer only carries them,
+        for whoever asks it to play."""
         self.net = net
+        self.win_weight, self.win_scale = win_weight, win_scale
         self.engine = engine
         self.value_scale = value_scale
         self.device = device
@@ -101,6 +105,7 @@ class Choice:
     actions: np.ndarray  # chosen candidate index
     value: np.ndarray  # V of the chosen afterstate in points (0 if it ended the game by going out)
     win: np.ndarray  # P(mover wins) for the chosen afterstate
+    best: np.ndarray  # the highest score + V among the candidates: what Q-learning says the position is worth
 
 
 def choose(buffers: CandidateBuffers, scorer: Scorer | None, temperature: float, win_weight: float,
@@ -115,7 +120,7 @@ def choose(buffers: CandidateBuffers, scorer: Scorer | None, temperature: float,
     slots = np.flatnonzero(buffers.status == _core.STATUS_DECISION) if only is None else only
     if len(slots) == 0:
         empty = np.zeros(0, np.float32)
-        return Choice(slots, np.zeros(0, np.int32), empty, empty)
+        return Choice(slots, np.zeros(0, np.int32), empty, empty, empty)
     k = buffers.k
     counts = buffers.count[slots]
     valid = np.arange(k)[None, :] < counts[:, None]  # [D, k]
@@ -150,12 +155,26 @@ def choose(buffers: CandidateBuffers, scorer: Scorer | None, temperature: float,
         grid[valid_t] = per_candidate
         return grid.gather(1, actions[:, None]).squeeze(1).cpu().numpy()
 
-    return Choice(slots, actions.cpu().numpy().astype(np.int32), of_chosen(value), of_chosen(win))
+    worth = torch.full(valid.shape, -torch.inf, device=device)
+    worth[valid_t] = score + value
+    return Choice(slots, actions.cpu().numpy().astype(np.int32), of_chosen(value), of_chosen(win),
+                  worth.max(dim=1).values.cpu().numpy())
 
 
 def returns(mover: np.ndarray, spread_after: np.ndarray, score: np.ndarray, value: np.ndarray,
-            final_spread_seat0: int, td_lambda: float) -> np.ndarray:
+            final_spread_seat0: int, td_lambda: float, best: np.ndarray | None = None) -> np.ndarray:
     """Value targets for one game's afterstates, in points, each from its own mover's side.
+
+    With `best` given, the targets are those of deep Q-learning instead, and `td_lambda` is not
+    used. `best[t]` is the highest score + value among the moves the player of turn t could
+    choose from, so it is what the position before turn t was worth to them by the network's own
+    account, and
+
+        g[t] = -best[t+1]
+
+    for every turn but the last, which keeps `mc`: nothing follows it to look ahead to. The
+    difference from the rule below is one of whose move counts: Q-learning assumes the opponent
+    plays the move the network rates highest, where TD learns from the move that was played.
 
     `mc[t]` is the spread the mover of turn t actually gained after that move:
     final spread (their side) minus their spread right after the move.
@@ -170,6 +189,10 @@ def returns(mover: np.ndarray, spread_after: np.ndarray, score: np.ndarray, valu
     """
     final = np.where(mover == 0, final_spread_seat0, -final_spread_seat0).astype(np.float32)
     mc = final - spread_after
+    if best is not None:
+        g = mc.copy()
+        g[:-1] = -best[1:]
+        return g
     if td_lambda >= 1.0 or len(mc) < 2:
         return mc
     g = mc.copy()
@@ -223,9 +246,11 @@ class Actor:
 
     def __init__(self, engine: _core.Engine, leaves: _core.LeaveModel, replay: Replay, slots: int,
                  max_candidates: int, max_exchanges: int, td_lambda: float, device: torch.device,
-                 first_seed: int, sampling_seed: int, belief_samples: int = 0):
+                 first_seed: int, sampling_seed: int, belief_samples: int = 0, q_learning: bool = False):
         """`belief_samples`: racks sampled per placement to infer what its player kept, for
-        networks that take that inference as an input (`model.belief_samples`)."""
+        networks that take that inference as an input (`model.belief_samples`). `q_learning`:
+        make deep Q-learning targets (`returns` with `best`) in place of TD(lambda) ones."""
+        self.q_learning = q_learning
         self.env = _core.BatchEnv(engine, leaves, slots, max_candidates, max_exchanges, belief_samples)
         self.buffers = CandidateBuffers(slots, max_candidates)
         self.replay = replay
@@ -244,6 +269,7 @@ class Actor:
         self.t_leave_value = np.zeros((slots, MAX_TURNS), np.float32)
         self.t_value = np.zeros((slots, MAX_TURNS), np.float32)
         self.t_win = np.zeros((slots, MAX_TURNS), np.float32)
+        self.t_best = np.zeros((slots, MAX_TURNS), np.float32)
         self.t_mover = np.zeros((slots, MAX_TURNS), np.int8)
         self.length = np.zeros(slots, np.int32)
         self.truncated = np.zeros(slots, bool)
@@ -264,8 +290,9 @@ class Actor:
         mover = self.t_mover[slot, :n]
         # A game longer than MAX_TURNS lost its tail, so bootstrapping across the gap is unsafe.
         lam = 1.0 if self.truncated[slot] else self.td_lambda
+        best = self.t_best[slot, :n] if self.q_learning and not self.truncated[slot] else None
         target = returns(mover, meta[:, _core.M_SPREAD].astype(np.float32), meta[:, _core.M_SCORE].astype(np.float32),
-                         self.t_value[slot, :n], score0 - score1, lam)
+                         self.t_value[slot, :n], score0 - score1, lam, best)
         final = np.where(mover == 0, score0 - score1, score1 - score0)
         won = ((final > 0) + 0.5 * (final == 0)).astype(np.float32)
         # Afterstates that ended the game by going out have a known value of 0: nothing to learn.
@@ -325,6 +352,7 @@ class Actor:
         self.t_leave_value[s, tt] = b.leave_value[s, a]
         self.t_value[s, tt] = choice.value[room]
         self.t_win[s, tt] = choice.win[room]
+        self.t_best[s, tt] = choice.best[room]
         self.t_mover[s, tt] = b.mover[s]
         self.length[s] += 1
         full = np.zeros(self.slots, np.int32)

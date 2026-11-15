@@ -116,7 +116,9 @@ class Players:
                                   f"not the installed {self.loaded.lexicon_id}")
             if state["leaves_hash"] != self.loaded.leaves_hash:
                 raise PlayerError(f"{name(spec)} was trained with different leave values than the ones installed")
-            scorer = Scorer(net, self.loaded.engine, state["config"]["train"]["value_scale"], self.device)
+            play = state["config"].get("selfplay", {})
+            scorer = Scorer(net, self.loaded.engine, state["config"]["train"]["value_scale"], self.device,
+                            win_weight=float(play.get("win_weight", 0.0)), win_scale=float(play.get("win_scale", 100.0)))
             self._scorers[key] = scorer
             while len(self._scorers) > self.cache_size:
                 self._scorers.popitem(last=False)

@@ -52,6 +52,12 @@ class ModelConfig:
     openness: bool = True  # which squares the next player can reach, how easily, and where seven tiles fit
     hooks: bool = True  # where one letter extends a word on the board, and where an S does
     belief_samples: int = 4  # racks sampled per placement to infer what the opponent kept (0 = no such input)
+    # Outputs added on 2026-11-15 for training from saved games (offline.py). The defaults are
+    # what every earlier network has.
+    kind: str = "cnn"  # the body of the network: "cnn", "cnn-global" (with board-wide pooling layers) or "transformer"
+    head: str = "flat"  # "flat": the head reads a few channels of every square; "pooled": only board-wide means and maxima
+    win_head: str = "binary"  # "binary": one win logit; "wdl": win, draw or loss
+    aux_heads: bool = False  # helper outputs for training: the opponent's next score and bingo, where the next moves land
 
 
 @dataclass
@@ -84,6 +90,7 @@ class TrainConfig:
     value_scale: float = 50.0  # points per unit of the value output
     huber_delta: float = 2.0  # Huber loss transition, in value-output units
     win_loss_weight: float = 0.5  # weight of the win-probability loss
+    target: str = "td"  # "td": learn from what followed in the game (TD(lambda)); "q": deep Q-learning
     td_lambda: float = 0.7  # 1 = Monte Carlo targets; below 1 mixes in the network's own later estimates
     replay_capacity: int = 3_000_000  # positions kept (about 310 bytes each)
     min_replay: int = 100_000  # positions needed before training starts
@@ -101,12 +108,51 @@ class TrainConfig:
 
 
 @dataclass
+class OfflineConfig:
+    """Training from saved games (`scrabble-ai train-games`, offline.py). The self-play trainer
+    does not read this section."""
+
+    games: str = ""  # the game set to learn from: a name under data/games, or a folder
+    passes: float = 6.0  # times through the games; each pass takes one fresh position from every game
+    batch_size: int = 2048
+    learning_rate: float = 3e-4  # peak; falls along a cosine to a twentieth of it
+    warmup_steps: int = 500
+    weight_decay: float = 1e-4
+    grad_clip: float = 1.0
+    validation_games: int = 20_000  # games held out of training, for measuring the loss on games never trained on
+    validate_steps: int = 500  # training steps between those measurements
+    aux_share: float = 0.15  # each helper output's pull on the network as a share of the main output's (0 = fixed weights)
+    spread_weight: float = 0.25  # fixed weight of the points output when aux_share is 0
+    aux_weight: float = 0.1  # fixed weight of each other helper output when aux_share is 0
+    eval_minutes: float = 30.0  # how often to play the static evaluator
+    eval_pairs: int = 2000  # seat-swapped pairs in those matches (about +/- 1.3 points of win rate)
+    final_pairs: int = 10_000  # pairs in the match at the end of the run (about +/- 0.6)
+    checkpoint_minutes: float = 10.0
+    keep_checkpoints: int = 3
+    augment_transpose: bool = True
+    amp: bool = True
+
+
+# What `scrabble-ai train-games` changes in the other sections unless told otherwise: the network
+# it trains predicts win, draw or loss from board-wide summaries, with helper outputs, and picks
+# its move by win chance with points breaking ties.
+OFFLINE_DEFAULTS: dict[str, Any] = {
+    "model.head": "pooled",
+    "model.win_head": "wdl",
+    "model.aux_heads": True,
+    "selfplay.win_weight": 0.9,
+    "selfplay.max_candidates": 32,
+}
+
+
+@dataclass
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     warmstart: WarmStartConfig = field(default_factory=WarmStartConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    offline: OfflineConfig = field(default_factory=OfflineConfig)
 
     def to_dict(self) -> dict[str, dict[str, Any]]:
         return dataclasses.asdict(self)
@@ -118,6 +164,17 @@ class Config:
             (self.model.channels >= 8, "model.channels must be at least 8"),
             (self.model.channels % 8 == 0, "model.channels must be a multiple of 8"),
             (0 <= self.model.belief_samples <= 64, "model.belief_samples must be between 0 and 64"),
+            (self.model.kind in ("cnn", "cnn-global", "transformer"), "model.kind must be 'cnn', 'cnn-global' or 'transformer'"),
+            (self.model.head in ("flat", "pooled"), "model.head must be 'flat' or 'pooled'"),
+            (self.model.win_head in ("binary", "wdl"), "model.win_head must be 'binary' or 'wdl'"),
+            (self.offline.passes > 0, "offline.passes must be positive"),
+            (self.offline.batch_size >= 1, "offline.batch_size must be at least 1"),
+            (self.offline.learning_rate > 0, "offline.learning_rate must be positive"),
+            (self.offline.validation_games >= 0, "offline.validation_games cannot be negative"),
+            (self.offline.validate_steps >= 1, "offline.validate_steps must be at least 1"),
+            (0.0 <= self.offline.aux_share <= 1.0, "offline.aux_share must be between 0 and 1"),
+            (self.offline.eval_pairs >= 2 and self.offline.final_pairs >= 2, "offline.eval_pairs and offline.final_pairs must be at least 2"),
+            (self.offline.keep_checkpoints >= 1, "offline.keep_checkpoints must be at least 1"),
             (self.selfplay.games >= 1, "selfplay.games must be at least 1"),
             (2 <= self.selfplay.max_candidates <= 512, "selfplay.max_candidates must be between 2 and 512"),
             (0 <= self.selfplay.max_exchanges < self.selfplay.max_candidates,
@@ -126,6 +183,7 @@ class Config:
             (self.selfplay.temperature_start >= 0, "selfplay.temperature_start cannot be negative"),
             (self.selfplay.temperature_end >= 0, "selfplay.temperature_end cannot be negative"),
             (0.0 <= self.train.td_lambda <= 1.0, "train.td_lambda must be between 0 and 1"),
+            (self.train.target in ("td", "q"), "train.target must be 'td' or 'q'"),
             (self.train.batch_size >= 1, "train.batch_size must be at least 1"),
             (self.train.learning_rate > 0, "train.learning_rate must be positive"),
             (self.train.min_replay >= self.train.batch_size, "train.min_replay must be at least train.batch_size"),
@@ -248,7 +306,8 @@ def load_config(path: Path | None = None, overrides: list[str] | None = None) ->
 # value that describes how things were then. (A missing setting cannot mean today's default: a
 # network saved before an input existed does not have that input.)
 BEFORE_IT_EXISTED: dict[str, dict[str, Any]] = {
-    "model": {"extra_scalars": False, "last_move_plane": False, "openness": False, "hooks": False, "belief_samples": 0},
+    "model": {"extra_scalars": False, "last_move_plane": False, "openness": False, "hooks": False, "belief_samples": 0,
+              "kind": "cnn", "head": "flat", "win_head": "binary", "aux_heads": False},
 }
 
 

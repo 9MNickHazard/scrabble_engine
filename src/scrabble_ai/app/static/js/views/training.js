@@ -227,22 +227,108 @@ window.LabKit = (function () {
     behind: { label: "Behind the baseline", tone: "warning", icon: "arrowDown" },
     worse: { label: "Got worse", tone: "critical", icon: "trendDown" },
   };
+  /** The same states for a run that trains from games, where they are about its win rate
+   *  against the static evaluator (ahead: the whole interval above 50%). */
+  const HEALTH_GAMES = {
+    ahead: { label: "Beats the static bot", tone: "good", icon: "trendUp" },
+    level: { label: "Level with the static bot", tone: "level", icon: "equals" },
+    behind: { label: "Behind the static bot", tone: "warning", icon: "arrowDown" },
+    worse: { label: "Got worse", tone: "critical", icon: "trendDown" },
+  };
   const HEALTH_ORDER = { ahead: 0, level: 1, behind: 2, worse: 3 };
 
-  /** The verdict on a run as a chip, its sentence as the tooltip. null for no verdict. */
-  function healthChip(health, extraClass) {
-    if (!health || !HEALTH[health.state]) return null;
-    const meta = HEALTH[health.state];
+  /** The verdict on a run as a chip, its sentence as the tooltip. null for no verdict. `games`:
+   *  the run trains from games, so the states are about its win rate. */
+  function healthChip(health, extraClass, games = false) {
+    const table = games ? HEALTH_GAMES : HEALTH;
+    if (!health || !table[health.state]) return null;
+    const meta = table[health.state];
     return h("span", { class: "hl-chip hl-" + meta.tone + (extraClass ? " " + extraClass : ""),
       title: health.note ? App.fmt.prose(health.note) : meta.label },
     icon(meta.icon, 14), h("span", null, meta.label));
   }
 
-  /** run.trend as a sparkline against zero, with each evaluation's interval as a band.
+  // ---- Runs that train from saved games ----------------------------------------------------
+  // Such a run (`mode` "games") is judged by its win rate against the static evaluator
+  // (greedy-leave): 50% is level, and only a whole 95% interval above one half is a win.
+
+  const isGames = (run) => !!run && run.mode === "games";
+
+  /** "up" when the whole interval of a win rate is above one half, "down" when below, else null. */
+  function winSignificance(rate, ci) {
+    if (typeof rate !== "number" || typeof ci !== "number") return null;
+    if (rate - ci > 0.5) return "up";
+    if (rate + ci < 0.5) return "down";
+    return null;
+  }
+
+  /** "53.4% ± 1.3": a win rate and the half-width of its interval, in percentage points. */
+  function winText(rate, ci) {
+    if (typeof rate !== "number") return "–";
+    return fmt.pct(rate) + (typeof ci === "number" ? " ± " + (100 * ci).toFixed(1) : "");
+  }
+
+  /** A few words on what a win rate's interval shows, for the hint under a figure. */
+  function winVerdict(rate, ci) {
+    if (typeof rate !== "number") return "";
+    if (typeof ci !== "number") return "no interval recorded";
+    const sig = winSignificance(rate, ci);
+    if (sig === "up") return "clears 50%: wins more than it loses";
+    if (sig === "down") return "below 50%: loses more than it wins";
+    return "includes 50%: not shown to win more";
+  }
+
+  /** A win rate with its interval and a marker when the interval excludes one half; the
+   *  counterpart of `spread` for runs trained from games. entry: {win_rate, win_ci}. */
+  function winCell(entry, against = "the static evaluator") {
+    const rate = entry && typeof entry.win_rate === "number" ? entry.win_rate : null;
+    if (rate === null) return h("span", { class: "muted" }, "–");
+    const ci = typeof entry.win_ci === "number" ? entry.win_ci : null;
+    const sig = winSignificance(rate, ci);
+    const title = sig === "up" ? `Wins more than half its games against ${against}: the whole 95% interval is above 50%.`
+      : sig === "down" ? `Wins less than half its games against ${against}: the whole 95% interval is below 50%.`
+        : ci === null ? `Share of games won against ${against}.`
+          : `Not yet distinguishable from half against ${against}: the 95% interval includes 50%.`;
+    return h("span", { class: "tm-spread", title },
+      h("span", { class: "tm-spread-value" }, fmt.pct(rate)),
+      ci === null ? null : h("span", { class: "tm-spread-ci" }, "± " + (100 * ci).toFixed(1)),
+      h("span", { class: "tm-sig" + (sig ? " tm-sig-" + sig : "") },
+        sig ? h("span", { class: "tm-icon", html: svg(sig, 10) }) : null,
+        sig ? h("span", { class: "tm-sr" }, sig === "up" ? "significantly more than half" : "significantly less than half") : null));
+  }
+
+  /** The network of a run in words: "6x64", or for a run that chose another kind of network
+   *  "6x64 CNN with board-wide pooling", "8x192 transformer". */
+  function networkLabel(run) {
+    if (!run) return "–";
+    const net = run.network || "–";
+    const kind = run.changed && run.changed["model.kind"];
+    if (kind === "transformer") return `${net} transformer`;
+    if (kind === "cnn-global") return `${net} CNN with board-wide pooling`;
+    return isGames(run) ? `${net} CNN` : net;
+  }
+
+  /** A model's win rate against greedy-leave with its interval. GET /api/models gives the rate
+   *  alone; the interval is in its run's `trend` (the match at the model's step). */
+  function modelWin(model, run) {
+    const e = model && model.eval && model.eval["greedy-leave"];
+    const rate = e && typeof e.win_rate === "number" ? e.win_rate : null;
+    let ci = null;
+    const t = run && run.trend;
+    if (t && Array.isArray(t.step) && Array.isArray(t.win_ci) && model && typeof model.step === "number") {
+      const i = t.step.lastIndexOf(model.step);
+      if (i >= 0 && typeof t.win_ci[i] === "number") ci = t.win_ci[i];
+    }
+    return rate === null ? null : { win_rate: rate, win_ci: ci };
+  }
+
+  /** run.trend as a sparkline against zero, with each evaluation's interval as a band; for a run
+   *  that trains from games, its win rate against 50%, by training step.
    *  Returns {node, chart}; chart is null when there is nothing to draw. */
   function trendSpark(run, options = {}) {
     const t = run && run.trend;
     const node = h("span", { class: "hl-spark" });
+    if (isGames(run)) return winSpark(run, node, options);
     if (!t || !Array.isArray(t.games) || !Array.isArray(t.spread) || !t.games.length) return { node, chart: null };
     const points = [];
     const band = [];
@@ -260,6 +346,231 @@ window.LabKit = (function () {
       label: `Spread against greedy + leave at each of ${points.length} evaluations; the latest is ${fmt.signed(points[points.length - 1][1])}`,
     }, options));
     return { node, chart };
+  }
+
+  function winSpark(run, node, options) {
+    const t = run.trend;
+    if (!t || !Array.isArray(t.win_rate) || !t.win_rate.length) return { node, chart: null };
+    const xs = Array.isArray(t.step) && t.step.length === t.win_rate.length ? t.step : t.games;
+    const byStep = xs === t.step;
+    const points = [];
+    const band = [];
+    t.win_rate.forEach((rate, i) => {
+      const x = xs ? xs[i] : i;
+      if (typeof x !== "number" || typeof rate !== "number") return;
+      points.push([x, rate]);
+      const ci = Array.isArray(t.win_ci) ? t.win_ci[i] : null;
+      if (typeof ci === "number") band.push([x, rate - ci, rate + ci]);
+    });
+    if (!points.length) return { node, chart: null };
+    const chart = Charts.sparkline(node, Object.assign({
+      points, band, referenceY: 0.5, width: 112, height: 30, color: "var(--series-1)",
+      format: (v) => fmt.pct(v) + " of games",
+      xFormat: (v) => (byStep ? "Step " + fmt.int(v) : fmt.compact(v) + " positions"),
+      label: `Win rate against the static evaluator at each of ${points.length} matches; the latest is ${fmt.pct(points[points.length - 1][1])}`,
+    }, options));
+    return { node, chart };
+  }
+
+  // ---- Settings forms: the pieces the Training and Train from games forms share -------------
+
+  const same = (a, b) => a === b ||
+    (typeof a === "number" && typeof b === "number" && Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b)));
+
+  /** The schema indexed for one form. `mode` is "selfplay" or "games": only the fields whose
+   *  `modes` include it (an older server sends no `modes`: every field then), sections left
+   *  empty dropped. For "games" each field's `default` is the one that will really apply
+   *  (`games_defaults` over the schema's; the schema's own stays as `schemaDefault`) and the
+   *  presets are `games_presets`. */
+  function indexSchema(schema, mode = "selfplay") {
+    const games = mode === "games";
+    const over = (games && schema.games_defaults) || {};
+    const shown = (f) => !Array.isArray(f.modes) || f.modes.includes(mode);
+    const fields = [];
+    const byKey = {};
+    const sections = [];
+    for (const section of schema.sections || []) {
+      const list = [];
+      for (const field of section.fields || []) {
+        if (!shown(field)) continue;
+        const copy = Object.assign({ section: section.name, schemaDefault: field.default }, field);
+        if (Object.prototype.hasOwnProperty.call(over, field.key)) copy.default = over[field.key];
+        fields.push(copy);
+        byKey[field.key] = copy;
+        list.push(copy);
+      }
+      if (list.length) sections.push(Object.assign({}, section, { fields: list }));
+    }
+    const presets = (games ? schema.games_presets : schema.presets) || [];
+    const presetKeys = [...new Set(presets.flatMap((p) => Object.keys(p.overrides || {})))].filter((k) => byKey[k]);
+    return { sections, fields, byKey, presets, presetKeys, speed: schema.speed || [] };
+  }
+
+  /** "3,000,000", "2M", "300k", "1e-4", "0.0003" -> a number; anything else -> null. */
+  function parseNumber(text) {
+    const t = String(text).trim().replace(/[,_\s]/g, "");
+    const match = t.match(/^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)([km]?)$/i);
+    if (!match) return null;
+    let n = Number(match[1]);
+    if (match[2]) {
+      n *= match[2].toLowerCase() === "k" ? 1e3 : 1e6;
+      if (Math.abs(n - Math.round(n)) < 1e-6) n = Math.round(n);
+    }
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function showNumber(field, value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value !== "number") return String(value);
+    if (field.type === "int" && Number.isInteger(value)) return fmt.int(value);
+    return String(Number(value.toPrecision(10)));
+  }
+
+  function formatValue(field, value) {
+    if (value === null || value === undefined) return "–";
+    if (field.type === "bool") return value ? "on" : "off";
+    if (typeof value !== "number") return value === "" ? "empty" : String(value);
+    if (field.type === "int") return fmt.int(value);
+    return String(Number(value.toPrecision(6)));
+  }
+
+  function fieldError(field, value) {
+    if (field.type === "int" || field.type === "float") {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "Enter a number.";
+      if (field.type === "int" && !Number.isInteger(value)) return "Enter a whole number.";
+      const lo = field.min;
+      const hi = field.max;
+      const has = (v) => v !== null && v !== undefined;
+      if (has(lo) && has(hi) && (value < lo || value > hi)) return `Must be between ${formatValue(field, lo)} and ${formatValue(field, hi)}.`;
+      if (has(lo) && value < lo) return `Must be at least ${formatValue(field, lo)}.`;
+      if (has(hi) && value > hi) return `Must be at most ${formatValue(field, hi)}.`;
+      if (field.type === "int" && field.multiple_of > 1 && value % field.multiple_of !== 0) return `Must be a multiple of ${field.multiple_of}.`;
+    }
+    if (field.type === "choice" && field.options && !field.options.includes(value)) return "Choose one of the options.";
+    return null;
+  }
+
+  /** The input for one setting: a switch, a select, a number box that takes "2M" and "300k" and
+   *  shows separators, or a text box. It reads and writes values[field.key] and calls
+   *  onChange() after every edit. Returns {node, input, set(value), frame}. */
+  function settingControl(field, values, id, onChange) {
+    const key = field.key;
+    if (field.type === "bool") {
+      const input = h("input", { type: "checkbox", id, role: "switch" });
+      const text = h("span", { class: "tm-toggle-text" });
+      const set = (v) => { input.checked = !!v; text.textContent = v ? "On" : "Off"; };
+      input.addEventListener("change", () => { values[key] = input.checked; text.textContent = input.checked ? "On" : "Off"; onChange(); });
+      set(values[key]);
+      return { node: h("label", { class: "toggle tm-toggle" }, input, text), input, set, frame: null };
+    }
+    if (field.type === "choice") {
+      const select = h("select", { class: "select", id }, (field.options || []).map((o) => h("option", { value: o }, o)));
+      const set = (v) => { select.value = v; };
+      select.addEventListener("change", () => { values[key] = select.value; onChange(); });
+      set(values[key]);
+      return { node: select, input: select, set, frame: select };
+    }
+    if (field.type === "int" || field.type === "float") {
+      const input = h("input", { type: "text", id, inputmode: field.type === "int" ? "numeric" : "decimal",
+        autocomplete: "off", spellcheck: "false", "aria-describedby": null });
+      const frame = h("div", { class: "tm-num" }, input, field.unit ? h("span", { class: "tm-num-unit" }, field.unit) : null);
+      frame.addEventListener("mousedown", (event) => { if (event.target !== input) { event.preventDefault(); input.focus(); } });
+      const set = (v) => { input.value = showNumber(field, v); };
+      input.addEventListener("input", () => {
+        const n = parseNumber(input.value);
+        values[key] = n === null ? input.value.trim() : n;
+        onChange();
+      });
+      input.addEventListener("blur", () => { if (typeof values[key] === "number") set(values[key]); });
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        const current = typeof values[key] === "number" ? values[key] : field.default;
+        if (typeof current !== "number") return;
+        event.preventDefault();
+        const step = field.step || (field.type === "int" ? 1 : 0.1);
+        let next = current + (event.key === "ArrowUp" ? step : -step);
+        if (field.min !== null && field.min !== undefined) next = Math.max(field.min, next);
+        if (field.max !== null && field.max !== undefined) next = Math.min(field.max, next);
+        next = field.type === "int" ? Math.round(next) : Number(next.toFixed(10));
+        values[key] = next;
+        set(next);
+        onChange();
+      });
+      set(values[key]);
+      return { node: frame, input, set, frame };
+    }
+    const input = h("input", { type: "text", class: "input", id, spellcheck: "false", autocomplete: "off",
+      placeholder: field.default === "" ? "Default" : null });
+    const set = (v) => { input.value = v === null || v === undefined ? "" : String(v); };
+    input.addEventListener("input", () => { values[key] = input.value; onChange(); });
+    set(values[key]);
+    return { node: input, input, set, frame: input };
+  }
+
+  /** One row of "All settings": label, lock, key, help, what lower and higher do, and the control
+   *  with room for an error and the "Default … Reset" line. Returns the control with
+   *  {field, err, meta, row, kind: "row"} added; markSettingRow keeps it up to date. */
+  function settingRow(field, values, onChange, idPrefix = "tm-f-") {
+    const id = idPrefix + field.key.replace(/[^a-z0-9]/gi, "-");
+    const control = settingControl(field, values, id, onChange);
+    const err = h("div", { class: "tm-field-error", hidden: true });
+    const meta = h("div", { class: "tm-setting-meta", hidden: true });
+    const row = h("div", { class: "tm-setting", dataset: { key: field.key } },
+      h("div", { class: "tm-setting-text" },
+        h("div", { class: "tm-setting-name" },
+          h("label", { class: "tm-setting-label", for: id }, field.label),
+          field.locked_on_resume ? h("span", { class: "tm-lock", title: "Fixed for the life of the run: it cannot be changed when resuming" }, icon("lock", 12)) : null,
+          h("code", { class: "tm-key" }, field.key)),
+        field.help ? h("p", { class: "tm-setting-help" }, field.help) : null,
+        effectLines(field)),
+      h("div", { class: "tm-setting-control" }, control.node, err, meta));
+    return Object.assign(control, { field, err, meta, row, kind: "row", metaValue: undefined });
+  }
+
+  /** Mark a settings row as changed (from `def`) or in error, with the default and a Reset
+   *  button under its control while it differs. */
+  function markSettingRow(ctl, value, def, error, onReset) {
+    const changed = !same(value, def);
+    ctl.row.classList.toggle("is-changed", changed);
+    ctl.row.classList.toggle("is-error", !!error);
+    if (ctl.frame) ctl.frame.classList.toggle("is-changed", changed && !error);
+    ctl.meta.hidden = !changed;
+    if (changed && ctl.metaValue !== String(value)) {
+      ctl.metaValue = String(value);
+      ctl.meta.replaceChildren(h("span", null, "Default ", h("span", { class: "tm-default" }, formatValue(ctl.field, def))),
+        h("button", { type: "button", class: "tm-reset", "aria-label": `Reset ${ctl.field.label} to its default`, onclick: onReset },
+          icon("reset", 12), "Reset"));
+    }
+    if (!changed) ctl.metaValue = undefined;
+  }
+
+  /** Whether a setting matches a search of "All settings": its label, key, help and effects. */
+  function settingMatches(field, query) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return true;
+    return `${field.label} ${field.key} ${field.help || ""} ${effectsText(field)}`.toLowerCase().includes(q);
+  }
+
+  /** The settings a run keeps for life (`locked_on_resume`) as a note with a lock, from the
+   *  sections of an indexed schema: a section locked whole is named once ("every network setting
+   *  (model.*)"), the rest one by one. null when none is locked. */
+  function lockedNote(sections, lead = "Fixed for the life of the run, so not changeable here") {
+    const parts = [];
+    for (const section of sections || []) {
+      const fields = (section.fields || []).filter((f) => f.locked_on_resume);
+      if (!fields.length) continue;
+      if (fields.length === section.fields.length) parts.push(`every ${String(section.title || section.name).toLowerCase()} setting (${section.name}.*)`);
+      else for (const f of fields) parts.push(`${f.label.toLowerCase()} (${f.key})`);
+    }
+    if (!parts.length) return null;
+    const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+    return h("p", { class: "tm-locked-note" }, icon("lock", 13), h("span", null, `${lead}: ${list}.`));
+  }
+
+  /** What "All settings" says when a search matches nothing. */
+  function noMatchContent(query) {
+    return [h("strong", null, `No setting matches “${String(query || "").trim()}”.`),
+      h("span", null, "Search looks at the label, the key, the help text and what turning a setting down or up does.")];
   }
 
   // ---- Renaming a run (and so its models) ---------------------------------------------------
@@ -411,7 +722,10 @@ window.LabKit = (function () {
 
   return {
     svg, icon, significance, spread, spreadLegend, approx, sortHeader, compareBy, menu, toggleMenu, closeMenu, isMenuOpen,
-    HEALTH, HEALTH_ORDER, healthChip, trendSpark, renameBlocked, renameDialog, effectRows, effectSide, effectsText, effectLines,
+    HEALTH, HEALTH_GAMES, HEALTH_ORDER, healthChip, trendSpark, renameBlocked, renameDialog, effectRows, effectSide, effectsText, effectLines,
+    isGames, winSignificance, winText, winVerdict, winCell, networkLabel, modelWin,
+    same, indexSchema, parseNumber, showNumber, formatValue, fieldError, settingControl, settingRow, markSettingRow,
+    settingMatches, noMatchContent, lockedNote,
   };
 })();
 
@@ -468,59 +782,20 @@ window.LabKit = (function () {
 
   // ---- Schema and values ----------------------------------------------------------------
 
-  function indexSchema(schema) {
-    const fields = [];
-    const byKey = {};
-    for (const section of schema.sections || []) {
-      for (const field of section.fields || []) {
-        const copy = Object.assign({ section: section.name }, field);
-        fields.push(copy);
-        byKey[field.key] = copy;
-      }
-    }
-    const presets = schema.presets || [];
-    const presetKeys = [...new Set(presets.flatMap((p) => Object.keys(p.overrides || {})))].filter((k) => byKey[k]);
-    return { sections: schema.sections || [], fields, byKey, presets, presetKeys, speed: schema.speed || [] };
-  }
-
-  const same = (a, b) => a === b ||
-    (typeof a === "number" && typeof b === "number" && Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b)));
+  // This form starts self-play runs: only the settings whose `modes` include "selfplay" (the
+  // `offline` section belongs to Train from games).
+  const indexSchema = (schema) => K.indexSchema(schema, "selfplay");
+  const { same, parseNumber, showNumber, formatValue, fieldError } = K;
   const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const enc = encodeURIComponent;
+  /** History lists self-play runs; runs that train from games have their own page. */
+  const selfPlayRuns = () => (runsCache || []).filter((r) => !K.isGames(r));
 
   function initialValue(key) {
     const field = S.byKey[key];
     if (!field) return undefined;
     if (key === KEY.hours && !(field.default > 0)) return SUGGESTED_HOURS;
     return field.default;
-  }
-
-  function formatValue(field, value) {
-    if (value === null || value === undefined) return "–";
-    if (field.type === "bool") return value ? "on" : "off";
-    if (typeof value !== "number") return value === "" ? "empty" : String(value);
-    if (field.type === "int") return fmt.int(value);
-    return String(Number(value.toPrecision(6)));
-  }
-
-  /** "3,000,000", "2M", "300k", "1e-4", "0.0003" -> a number; anything else -> null. */
-  function parseNumber(text) {
-    const t = String(text).trim().replace(/[,_\s]/g, "");
-    const match = t.match(/^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)([km]?)$/i);
-    if (!match) return null;
-    let n = Number(match[1]);
-    if (match[2]) {
-      n *= match[2].toLowerCase() === "k" ? 1e3 : 1e6;
-      if (Math.abs(n - Math.round(n)) < 1e-6) n = Math.round(n);
-    }
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function showNumber(field, value) {
-    if (value === null || value === undefined) return "";
-    if (typeof value !== "number") return String(value);
-    if (field.type === "int" && Number.isInteger(value)) return fmt.int(value);
-    return String(Number(value.toPrecision(10)));
   }
 
   /** The label, prefixed with its section when two settings share it ("Self-play candidate moves"). */
@@ -603,22 +878,6 @@ window.LabKit = (function () {
   }
 
   // ---- Validation -----------------------------------------------------------------------
-
-  function fieldError(field, value) {
-    if (field.type === "int" || field.type === "float") {
-      if (typeof value !== "number" || !Number.isFinite(value)) return "Enter a number.";
-      if (field.type === "int" && !Number.isInteger(value)) return "Enter a whole number.";
-      const lo = field.min;
-      const hi = field.max;
-      const has = (v) => v !== null && v !== undefined;
-      if (has(lo) && has(hi) && (value < lo || value > hi)) return `Must be between ${formatValue(field, lo)} and ${formatValue(field, hi)}.`;
-      if (has(lo) && value < lo) return `Must be at least ${formatValue(field, lo)}.`;
-      if (has(hi) && value > hi) return `Must be at most ${formatValue(field, hi)}.`;
-      if (field.type === "int" && field.multiple_of > 1 && value % field.multiple_of !== 0) return `Must be a multiple of ${field.multiple_of}.`;
-    }
-    if (field.type === "choice" && field.options && !field.options.includes(value)) return "Choose one of the options.";
-    return null;
-  }
 
   function nameError(run) {
     const name = run.name.trim();
@@ -1001,60 +1260,9 @@ window.LabKit = (function () {
       return h("div", { class: "field" }, h("label", { class: "field-label", for: id, title: field.help || null }, field.label), control.node, err);
     }
 
+    /** The input for one setting of `run` (LabKit.settingControl, shared with Train from games). */
     function makeControl(field, run, id) {
-      const key = field.key;
-      const changed = () => onValue(run, key);
-      if (field.type === "bool") {
-        const input = h("input", { type: "checkbox", id, role: "switch" });
-        const text = h("span", { class: "tm-toggle-text" });
-        const set = (v) => { input.checked = !!v; text.textContent = v ? "On" : "Off"; };
-        input.addEventListener("change", () => { run.values[key] = input.checked; text.textContent = input.checked ? "On" : "Off"; changed(); });
-        set(run.values[key]);
-        return { node: h("label", { class: "toggle tm-toggle" }, input, text), input, set, frame: null };
-      }
-      if (field.type === "choice") {
-        const select = h("select", { class: "select", id }, (field.options || []).map((o) => h("option", { value: o }, o)));
-        const set = (v) => { select.value = v; };
-        select.addEventListener("change", () => { run.values[key] = select.value; changed(); });
-        set(run.values[key]);
-        return { node: select, input: select, set, frame: select };
-      }
-      if (field.type === "int" || field.type === "float") {
-        // A text input, so large numbers can show separators ("3,000,000") and take "2M" or "300k".
-        const input = h("input", { type: "text", id, inputmode: field.type === "int" ? "numeric" : "decimal",
-          autocomplete: "off", spellcheck: "false", "aria-describedby": null });
-        const frame = h("div", { class: "tm-num" }, input, field.unit ? h("span", { class: "tm-num-unit" }, field.unit) : null);
-        frame.addEventListener("mousedown", (event) => { if (event.target !== input) { event.preventDefault(); input.focus(); } });
-        const set = (v) => { input.value = showNumber(field, v); };
-        input.addEventListener("input", () => {
-          const n = parseNumber(input.value);
-          run.values[key] = n === null ? input.value.trim() : n;
-          changed();
-        });
-        input.addEventListener("blur", () => { if (typeof run.values[key] === "number") set(run.values[key]); });
-        input.addEventListener("keydown", (event) => {
-          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-          const current = typeof run.values[key] === "number" ? run.values[key] : field.default;
-          if (typeof current !== "number") return;
-          event.preventDefault();
-          const step = field.step || (field.type === "int" ? 1 : 0.1);
-          let next = current + (event.key === "ArrowUp" ? step : -step);
-          if (field.min !== null && field.min !== undefined) next = Math.max(field.min, next);
-          if (field.max !== null && field.max !== undefined) next = Math.min(field.max, next);
-          next = field.type === "int" ? Math.round(next) : Number(next.toFixed(10));
-          run.values[key] = next;
-          set(next);
-          changed();
-        });
-        set(run.values[key]);
-        return { node: frame, input, set, frame };
-      }
-      const input = h("input", { type: "text", class: "input", id, spellcheck: "false", autocomplete: "off",
-        placeholder: field.default === "" ? "Default" : null });
-      const set = (v) => { input.value = v === null || v === undefined ? "" : String(v); };
-      input.addEventListener("input", () => { run.values[key] = input.value; changed(); });
-      set(run.values[key]);
-      return { node: input, input, set, frame: input };
+      return K.settingControl(field, run.values, id, () => onValue(run, field.key));
     }
 
     function allSettingsBlock(run) {
@@ -1103,40 +1311,25 @@ window.LabKit = (function () {
     }
 
     function settingRow(field, run) {
-      const id = "tm-f-" + field.key.replace(/[^a-z0-9]/gi, "-");
-      const control = makeControl(field, run, id);
-      const err = h("div", { class: "tm-field-error", hidden: true });
-      const meta = h("div", { class: "tm-setting-meta", hidden: true });
-      const row = h("div", { class: "tm-setting", dataset: { key: field.key } },
-        h("div", { class: "tm-setting-text" },
-          h("div", { class: "tm-setting-name" },
-            h("label", { class: "tm-setting-label", for: id }, field.label),
-            field.locked_on_resume ? h("span", { class: "tm-lock", title: "Fixed for the life of the run: it cannot be changed when resuming" }, K.icon("lock", 12)) : null,
-            h("code", { class: "tm-key" }, field.key)),
-          field.help ? h("p", { class: "tm-setting-help" }, field.help) : null,
-          K.effectLines(field)),
-        h("div", { class: "tm-setting-control" }, control.node, err, meta));
-      controls[field.key] = Object.assign(control, { field, err, meta, row, kind: "row", metaValue: undefined });
-      return row;
+      const ctl = K.settingRow(field, run.values, () => onValue(run, field.key));
+      controls[field.key] = ctl;
+      return ctl.row;
     }
 
     function applySearch() {
       if (!refs.noMatch) return;
-      const q = draft.search.trim().toLowerCase();
       let shown = 0;
       for (const section of refs.sections) {
         let any = false;
         for (const field of section.fields) {
-          const hay = `${field.label} ${field.key} ${field.help || ""} ${K.effectsText(field)}`.toLowerCase();
-          const match = !q || hay.includes(q);
+          const match = K.settingMatches(field, draft.search);
           controls[field.key].row.hidden = !match;
           if (match) { any = true; shown += 1; }
         }
         section.node.hidden = !any;
       }
       refs.noMatch.hidden = shown > 0;
-      refs.noMatch.replaceChildren(h("strong", null, `No setting matches “${draft.search.trim()}”.`),
-        h("span", null, "Search looks at the label, the key, the help text and what turning a setting down or up does."));
+      refs.noMatch.replaceChildren(...K.noMatchContent(draft.search));
     }
 
     /** Update error and changed markers, and everything derived from the values. */
@@ -1151,20 +1344,8 @@ window.LabKit = (function () {
         if (error) ctl.err.replaceChildren(K.icon("alert", 14), h("span", null, error));
         if (ctl.frame) ctl.frame.classList.toggle("is-error", !!error);
         if (ctl.kind !== "row") continue;
-        const value = run.values[key];
-        const changed = !same(value, ctl.field.default);
-        ctl.row.classList.toggle("is-changed", changed);
-        ctl.row.classList.toggle("is-error", !!error);
-        if (ctl.frame) ctl.frame.classList.toggle("is-changed", changed && !error);
-        ctl.meta.hidden = !changed;
-        if (changed && ctl.metaValue !== String(value)) {
-          ctl.metaValue = String(value);
-          ctl.meta.replaceChildren(h("span", null, "Default ", h("span", { class: "tm-default" }, formatValue(ctl.field, ctl.field.default))),
-            h("button", { type: "button", class: "tm-reset", "aria-label": `Reset ${ctl.field.label} to its default`,
-              onclick: () => { run.values[key] = ctl.field.default; ctl.set(ctl.field.default); onValue(run, key); } },
-            K.icon("reset", 12), "Reset"));
-        }
-        if (!changed) ctl.metaValue = undefined;
+        K.markSettingRow(ctl, run.values[key], ctl.field.default, error,
+          () => { run.values[key] = ctl.field.default; ctl.set(ctl.field.default); onValue(run, key); });
       }
       if (refs.nameHint) {
         const out = (run.values["run.out_dir"] || "runs").replace(/[\\/]+$/, "");
@@ -1478,7 +1659,8 @@ window.LabKit = (function () {
           : h("div", { class: "empty" }, "Loading runs…"));
         return;
       }
-      const runs = runsCache;
+      const runs = selfPlayRuns();
+      const fromGames = runsCache.length - runs.length;
       refs.tools.hidden = !runs.length;
       const counts = {
         all: runs.length,
@@ -1492,9 +1674,11 @@ window.LabKit = (function () {
           onclick: () => { hist.filter = key; renderHistory(); } }, label, h("span", { class: "tm-seg-count" }, String(counts[key]))))));
       const hours = runs.reduce((sum, r) => sum + (r.hours || 0), 0);
       const games = runs.reduce((sum, r) => sum + (r.games || 0), 0);
-      refs.countLine.textContent = runs.length
-        ? `${runs.length} run${runs.length > 1 ? "s" : ""}: ${fmt.duration(hours)} of training and ${fmt.compact(games)} games in all.`
-        : "No runs yet.";
+      App.append(App.clear(refs.countLine), [runs.length
+        ? `${runs.length} self-play run${runs.length > 1 ? "s" : ""}: ${fmt.duration(hours)} of training and ${fmt.compact(games)} games in all.`
+        : "No self-play runs yet.",
+      fromGames ? [" ", h("a", { href: "#/games?section=runs" }, `${fromGames} run${fromGames > 1 ? "s" : ""} trained from saved games`),
+        fromGames > 1 ? " are on the Train from games page." : " is on the Train from games page."] : null]);
       renderCompareButton();
       renderTable();
     }
@@ -1542,12 +1726,12 @@ window.LabKit = (function () {
     }
 
     function renderTable() {
-      const runs = runsCache || [];
+      const runs = selfPlayRuns();
       if (!runs.length) {
         refs.foot.hidden = true;
         refs.table.replaceChildren(h("div", { class: "empty tm-empty" },
           h("span", { class: "tm-empty-icon" }, K.icon("training", 28)),
-          h("strong", null, "No training runs yet"),
+          h("strong", null, runsCache && runsCache.length ? "No self-play runs yet" : "No training runs yet"),
           h("span", null, "Start one above. It appears here straight away, and keeps going when the app is closed.")));
         return;
       }
@@ -1923,7 +2107,7 @@ window.LabKit = (function () {
 
     function applyDemo() {
       const run = selectedRun();
-      const finished = (runsCache || []).filter((r) => r.status === "finished");
+      const finished = selfPlayRuns().filter((r) => r.status === "finished");
       if (demo === "multi" || demo === "parallel") {
         const second = { id: ++uid, name: copyName(run.name), autoName: false, values: Object.assign({}, run.values) };
         second.values[KEY.blocks] = 10;
@@ -1952,11 +2136,11 @@ window.LabKit = (function () {
         run.values["selfplay.max_candidates"] = 4;
         mapServerError(`${run.name}: selfplay.max_exchanges must be below max_candidates`);
       } else if (demo === "resume") {
-        const target = (runsCache || []).find((r) => r.status === "stopped" && r.checkpoints) || finished[0];
+        const target = selfPlayRuns().find((r) => r.status === "stopped" && r.checkpoints) || finished[0];
         if (target) openResume(target);
         return;
       } else if (demo === "compare") {
-        const pick = (runsCache || []).filter((r) => r.latest_eval).slice(0, 3);
+        const pick = selfPlayRuns().filter((r) => r.latest_eval).slice(0, 3);
         pick.forEach((r) => hist.selected.add(r.name));
         renderHistory();
         openCompare(pick.map((r) => r.name));
@@ -1968,7 +2152,7 @@ window.LabKit = (function () {
         if (finished[0]) renameRun(finished[0]);
         return;
       } else if (demo === "stop") {
-        const running = (runsCache || []).find((r) => r.status === "running");
+        const running = selfPlayRuns().find((r) => r.status === "running");
         if (running) stopRun(running);
         return;
       }

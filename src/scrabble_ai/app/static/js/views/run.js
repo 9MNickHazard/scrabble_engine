@@ -9,6 +9,11 @@
  * timeline; Settings, Log and Checkpoints are what they say. Not in the sidebar: the Training
  * page links here. Fields an older server does not send (health, the seen error, guard records)
  * are simply left out.
+ *
+ * A run that trains from saved games (run.mode "games", docs/APP_API.md) has the same tabs in
+ * its own terms: it is judged by its win rate against the static evaluator (50% is level), its
+ * charts are drawn against steps or hours, and nothing of self-play (temperature, the gate,
+ * self-play games) shows. Its report is the server's games report.
  */
 (function () {
   "use strict";
@@ -44,6 +49,8 @@
   };
 
   const isLive = (run) => run && (run.status === "running" || run.status === "stopping");
+  /** The run trains from saved games (docs/APP_API.md): judged by its win rate, not its spread. */
+  const gamesMode = (state) => !!(state.detail && K.isGames(state.detail.run));
   /** "8 h" rather than "8 h 00 m" for whole hours. */
   const hoursText = (hours) => fmt.duration(hours).replace(/ 00 m$/, "");
   const enc = encodeURIComponent;
@@ -106,6 +113,8 @@
     }
     const before = state.detail ? state.detail.run.status : null;
     state.detail = detail;
+    // A run trained from games counts its positions as "games": its charts go by steps.
+    if (!state.loaded && K.isGames(detail.run) && state.xmode === "games") state.xmode = "steps";
     const statusChanged = before !== null && before !== detail.run.status;
     let fresh = false;
     if (!state.loaded || isLive(detail.run) || statusChanged) fresh = await loadMetrics(state);
@@ -291,12 +300,27 @@
 
   function badge(run) {
     const [label, tone] = STATUS[run.status] || [run.status, "plain"];
-    const text = run.status === "running" && run.phase ? `${label} · ${PHASE[run.phase] || run.phase}` : label;
+    // Phases are self-play's (warm start, pretraining, self-play); a run trained from games has none.
+    const text = run.status === "running" && run.phase && !K.isGames(run) ? `${label} · ${PHASE[run.phase] || run.phase}` : label;
     return h("span", { class: "badge badge-" + tone }, text);
+  }
+
+  /** The sidebar marks Training for every run page; a run trained from games belongs to Train from games. */
+  function markSidebar(games) {
+    for (const item of document.querySelectorAll("#sidebar .nav-item")) {
+      const href = item.getAttribute("href");
+      if (href !== "#/training" && href !== "#/games") continue;
+      const on = href === (games ? "#/games" : "#/training");
+      item.classList.toggle("active", on);
+      if (on) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    }
   }
 
   function renderHead(state, els) {
     const run = state.detail.run;
+    const games = K.isGames(run);
+    markSidebar(games);
     const actions = h("div", { class: "page-actions" });
     const blocked = K.renameBlocked(run);
     actions.appendChild(h("span", { class: "tm-tip", title: blocked || `Rename ${run.name}, and with it its models` },
@@ -319,11 +343,13 @@
         icon(ICON.trash), "Delete"));
     }
     const params = run.parameters ? ` · ${fmt.int(run.parameters)} parameters` : "";
+    const from = games && run.game_set ? ` · trained from the game set ${run.game_set}` : "";
     els.head.replaceChildren(h("div", { class: "page-head run-head" },
       h("div", null,
-        h("a", { class: "dash-back", href: "#/training" }, icon(ICON.back), "Back to training"),
-        h("div", { class: "run-title" }, h("h1", null, run.name), badge(run), K.healthChip(run.health)),
-        h("p", { class: "lede" }, `${run.network} network${params} · ` + (run.status === "queued"
+        games ? h("a", { class: "dash-back", href: "#/games" }, icon(ICON.back), "Back to training from games")
+          : h("a", { class: "dash-back", href: "#/training" }, icon(ICON.back), "Back to training"),
+        h("div", { class: "run-title" }, h("h1", null, run.name), badge(run), K.healthChip(run.health, null, games)),
+        h("p", { class: "lede" }, `${K.networkLabel(run)} network${params}${from} · ` + (run.status === "queued"
           ? `queued ${fmt.datetime(run.created)}`
           : `started ${fmt.datetime(run.created)} · ` + (isLive(run) ? "live" : `last update ${fmt.ago(run.updated)}`)))),
       actions));
@@ -352,7 +378,14 @@
           : "It starts on its own when the run ahead of it finishes.")));
     } else if (run.status === "stopping") {
       nodes.push(h("div", { class: "notice notice-warning" }, icon(ICON.warning, "dash-notice-icon dash-tone-warning"),
-        h("div", null, h("strong", null, "Stopping. "), "The run is finishing its current step; then it evaluates and saves a checkpoint.")));
+        h("div", null, h("strong", null, "Stopping. "), gamesMode(state)
+          ? "The run is finishing its current step; then it checks its held-out games, plays a match against the static evaluator and saves a checkpoint."
+          : "The run is finishing its current step; then it evaluates and saves a checkpoint.")));
+    } else if (run.status === "running" && gamesMode(state)) {
+      if (!state.records.some((r) => r.kind === "train")) {
+        nodes.push(h("div", { class: "notice" }, icon(ICON.info, "dash-notice-icon dash-tone-info"), h("div", null, h("strong", null, "Starting. "),
+          `The run is opening the game set ${run.game_set || ""}. The charts begin with the first training report, about a minute in.`)));
+      }
     } else if (run.status === "running" && !state.records.some((r) => r.kind === "selfplay")) {
       const cfg = state.detail.config || {};
       const text = run.phase === "pretraining"
@@ -364,7 +397,40 @@
     els.notices.hidden = !nodes.length;
   }
 
+  /** A win rate as a tile's value: "53.4%" and, smaller, "± 1.3". */
+  function winValue(rate, ci) {
+    if (typeof rate !== "number") return "–";
+    return h("span", null, fmt.pct(rate), typeof ci === "number" ? h("span", { class: "stat-ci" }, " ± " + (100 * ci).toFixed(1)) : null);
+  }
+
+  function renderTilesGames(state, els) {
+    const run = state.detail.run;
+    const le = run.latest_eval;
+    const e = le && le["greedy-leave"];
+    const best = run.best_eval;
+    const starts = state.records.filter((r) => r.kind === "session" && r.event === "start");
+    const batch = (starts.length && starts[starts.length - 1].batch) || (((state.detail.config || {}).offline || {}).batch_size);
+    const timeHint = run.limit && run.limit.hours
+      ? `limit ${hoursText(run.limit.hours)} this session` : "no time limit: until the passes are done";
+    const rate = run.positions_per_second;
+    const passes = typeof run.passes === "number" ? String(Number(run.passes.toPrecision(4))) : null;
+    els.tiles.replaceChildren(
+      Charts.statTile({ label: "Positions trained", value: fmt.compact(run.positions),
+        hint: `one from each game · ${fmt.int(run.step)} steps` + (batch ? ` of ${fmt.int(batch)}` : "") }),
+      Charts.statTile({ label: "Positions per second", value: typeof rate === "number" ? fmt.int(rate) : "–",
+        hint: isLive(run) ? "latest minute" : typeof rate === "number" ? "last measured" : "not measured yet" }),
+      Charts.statTile({ label: "Time trained", value: fmt.duration(run.hours), hint: timeHint }),
+      Charts.statTile({ label: "Pass", value: typeof run.pass === "number" ? `${fmt.fixed(run.pass, 1)}${passes ? " of " + passes : ""}` : "–",
+        hint: run.total_steps ? `step ${fmt.int(run.step)} of ${fmt.int(run.total_steps)}` : "not started yet" }),
+      Charts.statTile({ label: "Against the static evaluator", value: e ? winValue(e.win_rate, e.win_ci) : "–",
+        hint: e ? `${K.winVerdict(e.win_rate, e.win_ci)}` : "no match yet" }),
+      Charts.statTile({ label: "Best network", value: run.has_best && best ? "step " + fmt.int(best.step) : run.has_best ? "step " + fmt.int(run.best_step) : "none yet",
+        hint: best ? `won ${K.winText(best.win_rate, best.win_ci)} of games` : "the first match sets one" }),
+    );
+  }
+
   function renderTiles(state, els) {
+    if (gamesMode(state)) { renderTilesGames(state, els); return; }
     const run = state.detail.run;
     const le = run.latest_eval;
     const gl = le && le["greedy-leave"];
@@ -628,6 +694,7 @@
 
   function renderProgress(state, panel) {
     if (!state.smoothing) state.smoothing = "light";
+    if (gamesMode(state)) { renderProgressGames(state, panel); return; }
     const live = h("span", { class: "dash-live" });
     state.liveNote = live;
     state.verdictEl = h("section", { class: "card vb", "aria-label": "Verdict" });
@@ -686,6 +753,7 @@
   }
 
   function updateProgress(state) {
+    if (gamesMode(state)) { updateProgressGames(state); return; }
     if (!state.charts.strength) return;
     const { opts, s } = progressOptions(state);
     const hadSmall = !!state.charts.valueLoss;
@@ -700,6 +768,279 @@
     }
     for (const [key, chart] of Object.entries(state.charts)) if (opts[key]) chart.update(opts[key]);
     if (state.caption) state.caption.textContent = strengthCaption(state, s);
+  }
+
+  // ---- Progress of a run that trains from games ----------------------------------------------
+
+  // The helper outputs a network trained from games may have, in the order the records list them.
+  const HELPERS = [
+    ["spread", "Final spread", "the points still to gain from the position"],
+    ["next_score", "Opponent's next score", "the opponent's next score"],
+    ["next_bingo", "Opponent's next bingo", "whether the opponent places all seven tiles next"],
+    ["next_squares", "Where the next moves land", "where the next two moves put their tiles"],
+  ];
+  const winTick = (v) => pctTick(v);
+  const winCiFormat = (v) => (100 * Math.abs(v)).toFixed(1);
+
+  function buildGamesSeries(records, mode) {
+    const X = X_MODES[mode];
+    const out = { win: [], winBand: [], spread: [], spreadBand: [], markers: [], trainWin: [], validWin: [], accuracy: [],
+      rmse: [], leaveOnly: [], lr: [], pps: [], help: {}, weights: {}, evalCount: 0, trainCount: 0, validCount: 0 };
+    for (const [key] of HELPERS) { out.help[key] = { train: [], valid: [] }; out.weights[key] = []; }
+    const lines = () => [out.win, out.spread, out.trainWin, out.validWin, out.accuracy, out.rmse, out.leaveOnly, out.lr, out.pps,
+      ...HELPERS.flatMap(([k]) => [out.help[k].train, out.help[k].valid, out.weights[k]])];
+    const num = (v) => typeof v === "number" && Number.isFinite(v);
+    let started = false;
+    for (const r of records) {
+      const x = X.of(r);
+      if (r.kind === "session") {
+        if (r.event === "start" && started) {
+          for (const list of lines()) list.push([x, null]);
+          out.winBand.push([x, null, null]);
+          out.spreadBand.push([x, null, null]);
+          out.markers.push({ x, label: "Resumed", tone: "info", detail: `A new session started from the checkpoint at step ${fmt.int(r.step)}.` });
+        }
+        continue;
+      }
+      started = true;
+      if (r.kind === "eval") {
+        if (r.opponent && r.opponent !== "greedy-leave") continue;
+        if (num(r.win_rate)) {
+          out.win.push([x, r.win_rate]);
+          if (num(r.win_ci)) out.winBand.push([x, r.win_rate - r.win_ci, r.win_rate + r.win_ci]);
+          out.evalCount++;
+        }
+        if (num(r.spread)) {
+          out.spread.push([x, r.spread]);
+          if (num(r.spread_ci)) out.spreadBand.push([x, r.spread - r.spread_ci, r.spread + r.spread_ci]);
+        }
+      } else if (r.kind === "best") {
+        out.markers.push({ x, label: "New best network", tone: "good", group: "New best network",
+          detail: `Step ${fmt.int(r.step)} won ${K.winText(r.win_rate, r.win_ci)} of games, the most so far, and was saved as best.pt.` });
+      } else if (r.kind === "train") {
+        out.trainCount++;
+        if (num(r.win_loss)) out.trainWin.push([x, r.win_loss]);
+        if (num(r.learning_rate)) out.lr.push([x, r.learning_rate]);
+        if (num(r.positions_per_second)) out.pps.push([x, r.positions_per_second]);
+        for (const [key] of HELPERS) {
+          if (num(r[key + "_loss"])) out.help[key].train.push([x, r[key + "_loss"]]);
+          if (num(r[key + "_weight"])) out.weights[key].push([x, r[key + "_weight"]]);
+        }
+      } else if (r.kind === "valid") {
+        out.validCount++;
+        if (num(r.win_loss)) out.validWin.push([x, r.win_loss]);
+        if (num(r.win_accuracy)) out.accuracy.push([x, r.win_accuracy]);
+        if (num(r.value_rmse_points)) out.rmse.push([x, r.value_rmse_points]);
+        if (num(r.leave_only_rmse_points)) out.leaveOnly.push([x, r.leave_only_rmse_points]);
+        for (const [key] of HELPERS) if (num(r[key + "_loss"])) out.help[key].valid.push([x, r[key + "_loss"]]);
+      }
+    }
+    const has = (points) => points.some((p) => typeof p[1] === "number");
+    out.helpers = HELPERS.filter(([k]) => has(out.help[k].train) || has(out.help[k].valid)).map(([k]) => k);
+    out.weighted = HELPERS.filter(([k]) => has(out.weights[k])).map(([k]) => k);
+    return out;
+  }
+
+  function gamesEmpty(state) {
+    const run = state.detail.run;
+    if (run.status === "queued") return "Waiting in the queue.";
+    return isLive(run) ? "No training report yet: they come about once a minute." : "This run ended before its first training report.";
+  }
+
+  function matchEmpty(state) {
+    const run = state.detail.run;
+    const minutes = (((state.detail.config || {}).offline || {}).eval_minutes);
+    if (run.status === "queued") return "Matches start once the run is training.";
+    if (isLive(run)) return minutes ? `No match yet. The first comes about ${fmt.int(minutes)} minutes into training (offline.eval_minutes).` : "No match yet.";
+    return "This run ended before its first match.";
+  }
+
+  function progressOptionsGames(state) {
+    const s = buildGamesSeries(state.records, state.xmode);
+    const x = xAxis(state.xmode);
+    const w = SMOOTHING[state.smoothing] || 0;
+    const sm = (points) => smooth(points, w);
+    const small = 176;
+    const empty = gamesEmpty(state);
+    const opts = {};
+    const xs = [...s.win, ...s.spread].filter((p) => typeof p[1] === "number").map((p) => p[0]);
+    const xShared = xs.length > 1 ? Object.assign({}, x, { min: Math.min(...xs), max: Math.max(...xs) }) : x;
+    const margin = { left: 52, right: 64 };
+    const winY = { label: "games won", format: (v) => fmt.pct(v, 1), tickFormat: winTick, ciFormat: winCiFormat };
+    opts.win = {
+      title: "Win rate",
+      series: [{ name: "Win rate", points: s.win, band: s.winBand, color: "var(--series-1)" }],
+      x: xShared, y: winY, referenceY: [{ y: 0.5, label: "50%: level" }], markers: s.markers, height: 330, margin,
+      empty: matchEmpty(state),
+    };
+    opts.spread = {
+      title: "Spread, secondary",
+      series: [{ name: "Spread", points: s.spread, band: s.spreadBand, color: "var(--series-2)" }],
+      x: xShared, y: { label: "points per game", format: (v) => fmt.signed(v), tickFormat: spreadTick }, referenceY: [{ y: 0, label: "even" }],
+      markers: s.markers, height: 200, margin, legend: false, empty: s.evalCount ? "No spread recorded." : matchEmpty(state),
+    };
+    const lossY = { label: "cross-entropy", format: (v) => v.toFixed(4), tickFormat: "auto" };
+    opts.winLoss = {
+      title: "Win loss: training batches and held-out games",
+      series: [
+        { name: "Training batches", points: sm(s.trainWin), color: "var(--series-1)" },
+        { name: "Held-out games", points: sm(s.validWin), color: "var(--series-2)" },
+      ],
+      x, y: lossY, height: 250, empty,
+    };
+    opts.accuracy = {
+      title: "Results named right on held-out games",
+      series: [{ name: "Named right", points: sm(s.accuracy), color: "var(--series-1)" }],
+      x, y: { label: "share of positions", format: (v) => fmt.pct(v, 1), tickFormat: winTick }, height: 250, legend: false,
+      empty: s.trainCount ? "No check on held-out games yet." : empty,
+    };
+    opts.rmse = {
+      title: "Points error on held-out games",
+      series: [
+        { name: "Network", points: sm(s.rmse), color: "var(--series-1)" },
+        { name: "Leave values only", points: s.leaveOnly, color: "var(--text-muted)", dashed: true },
+      ],
+      x, y: { label: "RMSE of the predicted spread, points", format: (v) => v.toFixed(2), tickFormat: "auto" }, height: 250,
+      empty: s.trainCount ? "No check on held-out games yet." : empty,
+    };
+    for (const [key, label] of HELPERS) {
+      if (!s.helpers.includes(key)) continue;
+      opts["help_" + key] = {
+        title: `${label} loss`,
+        series: [
+          { name: "Training", points: sm(s.help[key].train), color: "var(--series-1)" },
+          { name: "Held-out", points: sm(s.help[key].valid), color: "var(--series-2)" },
+        ],
+        x, y: { label: "loss", format: (v) => v.toFixed(4), tickFormat: "auto" }, height: small, empty,
+      };
+    }
+    if (s.weighted.length) {
+      opts.weights = {
+        title: "Helper weights",
+        series: HELPERS.filter(([k]) => s.weighted.includes(k)).map(([k, label], i) => ({ name: label, points: s.weights[k], color: `var(--series-${i + 1})` })),
+        x, y: { label: "weight beside the win output's 1", format: (v) => v.toFixed(3), tickFormat: "auto" }, height: small, empty, endLabels: false,
+      };
+    }
+    opts.lr = {
+      title: "Learning rate",
+      series: [{ name: "Learning rate", points: s.lr, color: "var(--series-1)" }],
+      x, y: { label: "step size", format: lrText, tickFormat: lrText }, height: small, legend: false, empty,
+    };
+    opts.pps = {
+      title: "Positions per second",
+      series: [{ name: "Positions per second", points: sm(s.pps), color: "var(--series-1)" }],
+      x, y: { label: "positions trained a second", format: (v) => fmt.int(v), tickFormat: "auto" }, height: small, legend: false, empty,
+    };
+    return { opts, s };
+  }
+
+  function gamesCaptions() {
+    const caps = {
+      winLoss: "Error of the predicted result: win, draw or loss. Good: both lines fall and the held-out line stays close to the training line; held-out rising while training falls is memorising.",
+      accuracy: "Share of held-out positions whose most likely result was the one that happened. Good: it rises, then levels off.",
+      rmse: "Error of the predicted final spread on held-out games, beside leave values alone. Good: the network's line ends below the leave-only line.",
+      weights: "How much each helper output counts in the loss, beside the win output's 1. They are re-set as training goes so that each pulls a fixed share (offline.aux_share); steady lines are normal.",
+      lr: "Size of each training step. It rises over the warm-up, then falls smoothly to a small fraction of its peak by the last step. Good: a smooth curve.",
+      pps: "Positions trained a second. Good: steady; dips mean a match or a check was running, or something else was using the GPU.",
+    };
+    for (const [key, , what] of HELPERS) {
+      caps["help_" + key] = `Error predicting ${what}: practice only, never used to choose a move. Good: training and held-out fall together.`;
+    }
+    return caps;
+  }
+
+  function winCaption(state, s) {
+    const pairs = (((state.detail.config || {}).offline || {}).eval_pairs);
+    if (!s.win.length) {
+      return (pairs ? `Each match plays ${fmt.int(pairs)} seat-swapped pairs against the static evaluator. ` : "") +
+        "Until a match's band clears 50%, the network has not been shown to win more than it loses.";
+    }
+    const valid = s.win.filter((p) => typeof p[1] === "number");
+    const bands = s.winBand.filter((b) => typeof b[1] === "number");
+    const last = valid[valid.length - 1];
+    const band = bands[bands.length - 1];
+    const ci = band ? (band[2] - band[1]) / 2 : null;
+    const head = `The latest match is ${K.winText(last[1], ci)}`;
+    if (band && band[1] > 0.5) return `${head}: its band clears 50%, so the network is shown to win more than half its games. Green flags mark each new best network.`;
+    if (band && band[2] < 0.5) return `${head}: its band is below 50%, so the network loses more games than it wins.`;
+    return `${head}. Until that band clears 50%, the network has not been shown to win more than it loses.`;
+  }
+
+  function renderProgressGames(state, panel) {
+    const live = h("span", { class: "dash-live" });
+    state.liveNote = live;
+    state.verdictEl = h("section", { class: "card vb", "aria-label": "Verdict" });
+    panel.appendChild(state.verdictEl);
+    renderVerdict(state);
+    if (verdictStale(state)) loadVerdict(state);
+    panel.appendChild(h("div", { class: "run-toolbar" },
+      h("div", { class: "row run-controls" },
+        segmented("Plot against", [["steps", "Steps"], ["hours", "Hours"]], state.xmode,
+          (key) => { state.xmode = key; renderPanel(state, { panel }); }),
+        segmented("Smoothing", [["off", "Off"], ["light", "Light"], ["heavy", "Heavy"]], state.smoothing,
+          (key) => { state.smoothing = key; renderPanel(state, { panel }); })),
+      live));
+    updateLiveNote(state);
+
+    const { opts, s } = progressOptionsGames(state);
+    state.gamesLayout = layoutKey(s);
+    const slots = {};
+    for (const key of Object.keys(opts)) slots[key] = h("div");
+    const caption = h("p", { class: "dash-caption" }, winCaption(state, s));
+    state.caption = caption;
+    panel.appendChild(h("div", { class: "card run-strength" },
+      h("div", { class: "run-strength-head" },
+        h("h2", null, "Strength against the static evaluator"),
+        h("p", { class: "card-sub" }, "Share of games the network won over seat-swapped pairs against the bot that plays the highest score plus " +
+          "leave value, with its 95% interval shaded. 50% is level. Matches are not smoothed.")),
+      slots.win, caption,
+      h("div", { class: "run-strength-second" }, slots.spread,
+        h("p", { class: "dash-caption" }, "Points per game against the static evaluator, with its 95% interval. Secondary for these runs: a network " +
+          "trained to win can be behind on points and ahead on wins."))));
+
+    if (!s.trainCount) {
+      panel.appendChild(h("p", { class: "empty" }, h("strong", null, "The other charts appear once training reports."),
+        "The losses, the checks on held-out games and the speed are logged about once a minute."));
+    } else {
+      const caps = gamesCaptions();
+      const card = (key, small) => h("div", { class: "card" + (small ? " run-small-card" : " run-mid-card") }, slots[key],
+        h("p", { class: "run-cap" }, caps[key]));
+      const group = (title, sub, ...grids) => h("section", { class: "run-group" },
+        h("div", { class: "run-group-head" }, h("h2", null, title), h("p", null, sub)), ...grids);
+      panel.appendChild(group("Is it learning?",
+        "On positions from games it never trains on (the held-out games), beside the batches it trains on.",
+        h("div", { class: "grid-3 run-grid" }, ["winLoss", "accuracy", "rmse"].map((key) => card(key)))));
+      const helperKeys = [...s.helpers.map((k) => "help_" + k), ...(opts.weights ? ["weights"] : [])];
+      if (helperKeys.length) {
+        panel.appendChild(group("Helper outputs",
+          "Extra outputs the network learns as practice, to read the board better: the final spread and, with helper outputs on, what the opponent does next.",
+          h("div", { class: "grid-4 run-grid" }, helperKeys.map((key) => card(key, true)))));
+      }
+      panel.appendChild(group("Training", "The optimiser's side: its step size, and how fast it works through the positions.",
+        h("div", { class: "grid-4 run-grid" }, ["lr", "pps"].map((key) => card(key, true)))));
+    }
+    for (const [key, options] of Object.entries(opts)) {
+      if (slots[key].isConnected) state.charts[key] = Charts.line(slots[key], options);
+    }
+  }
+
+  /** What decides the layout of the games Progress tab: laid out again when it changes. */
+  function layoutKey(s) {
+    return [s.trainCount > 0, s.helpers.join(","), s.weighted.length > 0].join("|");
+  }
+
+  function updateProgressGames(state) {
+    if (!state.charts.win) return;
+    const { opts, s } = progressOptionsGames(state);
+    if (layoutKey(s) !== state.gamesLayout) {
+      const panel = state.charts.win.element.closest(".run-panel");
+      if (panel) {
+        renderPanel(state, { panel });
+        return;
+      }
+    }
+    for (const [key, chart] of Object.entries(state.charts)) if (opts[key]) chart.update(opts[key]);
+    if (state.caption) state.caption.textContent = winCaption(state, s);
   }
 
   // ---- Verdict banner: how the run went, at the top of Progress ----------------------------
@@ -754,7 +1095,7 @@
     App.append(App.clear(el), [
       h("div", { class: "vb-top" },
         h("div", { class: "vb-main" },
-          h("div", { class: "vb-label" }, "How it went", K.healthChip(health)),
+          h("div", { class: "vb-label" }, "How it went", K.healthChip(health, null, gamesMode(state))),
           h("p", { class: "vb-headline" }, fmt.prose(report.headline))),
         h("div", { class: "vb-actions" },
           h("button", { type: "button", class: "button button-small", onclick: () => selectTab(state, state.els, "report") },
@@ -823,11 +1164,104 @@
     const bad = health.state === "worse" || health.state === "behind";
     return h("div", { class: "notice report-health" + (bad ? " notice-warning" : "") },
       bad ? icon(ICON.warning, "dash-notice-icon") : icon(ICON.info, "dash-notice-icon dash-tone-info"),
-      h("div", { class: "dash-notice-main" }, K.healthChip(health, "report-health-chip"), " ", fmt.prose(health.note),
+      h("div", { class: "dash-notice-main" }, K.healthChip(health, "report-health-chip", gamesMode(state)), " ", fmt.prose(health.note),
         bad ? [" ", h("a", { href: guideHref(state.name) }, "What to change: the tuning guide.")] : null));
   }
 
+  /** The clickable timeline of a report. `at(ev)` is where an event sits on the chart's x axis. */
+  function eventTimeline(state, list, events, chart, at, meta, selected) {
+    const items = events.map((ev, i) => {
+      const tone = ["good", "warning", "info", "critical"].includes(ev.tone) ? ev.tone : "info";
+      const item = h("li", { class: "report-event report-event-" + tone, tabindex: "0", role: "button", "aria-pressed": "false" },
+        icon(ICON[tone], "report-event-icon dash-tone-" + tone),
+        h("div", null,
+          h("div", { class: "report-event-title" }, fmt.prose(ev.title)),
+          ev.detail ? h("div", { class: "report-event-detail" }, fmt.prose(ev.detail)) : null,
+          h("div", { class: "report-event-meta" }, meta(ev))));
+      const choose = () => {
+        const already = state.selectedEvent === i;
+        state.selectedEvent = already ? null : i;
+        items.forEach((node, j) => {
+          node.classList.toggle("selected", j === state.selectedEvent);
+          node.setAttribute("aria-pressed", String(j === state.selectedEvent));
+        });
+        chart.highlight(already ? null : at(ev), already ? null : fmt.prose(ev.title));
+      };
+      item.addEventListener("click", choose);
+      item.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(); }
+      });
+      return item;
+    });
+    list.append(...items);
+    if (selected !== undefined && selected !== null && items[selected]) {
+      state.selectedEvent = null;
+      items[selected].click();
+    } else state.selectedEvent = null;
+  }
+
+  /** The report of a run that trains from games: the same three parts, in terms of win rate. */
+  function drawReportGames(state, panel, report, selected) {
+    const sum = report.summary || {};
+    const best = sum.best;
+    const final = sum.final;
+    const fs = sum.first_significant;
+    const held = sum.held_out;
+    const health = healthNotice(state, sum.health !== undefined ? sum.health : state.detail.run.health);
+    const events = report.events || [];
+    if (!sum.steps && !events.length) {
+      panel.append(h("p", { class: "report-headline" }, fmt.prose(report.headline)), ...(health ? [health] : []),
+        h("div", { class: "card" }, h("p", { class: "empty" }, h("strong", null, "Nothing to report yet."),
+          "The report fills in as the run trains: its matches against the static evaluator, new best networks and how each session ended.")));
+      return;
+    }
+    const passes = typeof sum.passes === "number" ? String(Number(sum.passes.toPrecision(3))) : null;
+    const matchHint = (m) => `step ${fmt.int(m.step)} · ${K.winVerdict(m.win_rate, m.win_ci)}`;
+    const tiles = [
+      Charts.statTile({ label: "Positions trained", value: fmt.compact(sum.positions),
+        hint: [typeof sum.hours === "number" ? `in ${fmt.duration(sum.hours)}` : null, passes ? `${passes} passes` : null].filter(Boolean).join(" · ") || null }),
+      Charts.statTile({ label: "Mean speed", value: sum.mean_positions_per_second ? fmt.int(sum.mean_positions_per_second) : "–", hint: "positions per second" }),
+      Charts.statTile({ label: "Training steps", value: fmt.int(sum.steps),
+        hint: sum.train_games ? `${fmt.compact(sum.train_games)} games of ${sum.game_set || "its set"} to learn from` : null }),
+      Charts.statTile({ label: "Matches", value: sum.evaluations === null || sum.evaluations === undefined ? "–" : String(sum.evaluations),
+        hint: "against the static evaluator" }),
+      Charts.statTile({ label: "Best win rate", value: best ? winValue(best.win_rate, best.win_ci) : "–",
+        hint: best ? matchHint(best) : "no match yet" }),
+      Charts.statTile({ label: "Latest win rate", value: final ? winValue(final.win_rate, final.win_ci) : "–",
+        hint: final ? `${matchHint(final)}` + (typeof final.spread === "number" ? ` · spread ${fmt.spread(final.spread, final.ci)}` : "") : "no match yet" }),
+      Charts.statTile({ label: "First clearly above half", value: fs ? `step ${fmt.int(fs.step)}` : final ? "not yet" : "–",
+        hint: fs ? `after ${fmt.duration(fs.hours)} of training · ${K.winText(fs.win_rate, fs.win_ci)}` : final ? "no match's interval has been above 50%" : "no match yet" }),
+      Charts.statTile({ label: "Held-out games", value: held && typeof held.win_accuracy === "number" ? fmt.pct(held.win_accuracy) + " right" : "–",
+        hint: held ? `points error ${fmt.fixed(held.value_rmse_points, 1)}, leave values alone ${fmt.fixed(held.leave_only_rmse_points, 1)}` : "not checked yet" }),
+    ];
+    const chartSlot = h("div");
+    const list = h("ol", { class: "report-timeline" });
+    panel.append(
+      h("p", { class: "report-headline" }, fmt.prose(report.headline)),
+      ...(health ? [health] : []),
+      h("div", { class: "grid-4 report-tiles" }, tiles),
+      h("div", { class: "split report-split" },
+        h("div", { class: "card report-chart" }, chartSlot,
+          h("p", { class: "dash-caption" }, "Select an event to see where it happened.")),
+        h("div", { class: "card report-events" },
+          h("div", { class: "card-head" }, h("div", { class: "card-title" }, "What happened"),
+            h("div", { class: "card-sub" }, events.length ? `${events.length} event${events.length === 1 ? "" : "s"}, oldest first` : "")),
+          events.length ? list : h("p", { class: "muted" }, "Nothing notable yet."))));
+    const s = buildGamesSeries(state.records, "hours");
+    const chart = Charts.line(chartSlot, {
+      title: "Win rate against the static evaluator",
+      subtitle: "Share of games won, with its 95% interval",
+      series: [{ name: "Win rate", points: s.win, band: s.winBand, color: "var(--series-1)" }],
+      x: xAxis("hours"), y: { label: "games won", format: (v) => fmt.pct(v, 1), tickFormat: winTick, ciFormat: winCiFormat },
+      referenceY: [{ y: 0.5, label: "50%: level" }], height: 340, empty: matchEmpty(state),
+    });
+    state.charts.report = chart;
+    eventTimeline(state, list, events, chart, (ev) => ev.hours,
+      (ev) => `${fmt.duration(ev.hours)} of training · ${fmt.compact(ev.games)} positions`, selected);
+  }
+
   function drawReport(state, panel, report, selected) {
+    if (gamesMode(state)) { drawReportGames(state, panel, report, selected); return; }
     const sum = report.summary || {};
     const best = sum.best;
     const final = sum.final;
@@ -921,32 +1355,54 @@
     const schema = await loadSchema(state);
     if (state.tab !== "settings" || !panel.isConnected) return;
     const config = state.detail.config || {};
+    const games = gamesMode(state);
+    const mode = games ? "games" : "selfplay";
+    // Each kind of run shows only the settings that apply to it (`modes` in the schema; an
+    // older server sends none, and then every setting shows).
+    const applies = (key) => {
+      const meta = schemaField(schema, key);
+      return !meta || !Array.isArray(meta.modes) || meta.modes.includes(mode);
+    };
+    // A games run's defaults are the schema's with games_defaults on top, as the server applies them.
+    const gamesDefaults = (games && schema && schema.games_defaults) || {};
+    const defaultOf = (key, meta) => (Object.prototype.hasOwnProperty.call(gamesDefaults, key) ? gamesDefaults[key] : meta ? meta.default : undefined);
     const changed = state.detail.run.changed || {};
-    const changedKeys = Object.keys(changed).filter((k) => k !== "run.name");
+    let changedKeys = Object.keys(changed).filter((k) => k !== "run.name" && applies(k));
+    if (games) {
+      changedKeys = changedKeys.filter((k) => k !== "offline.games" &&
+        !(Object.prototype.hasOwnProperty.call(gamesDefaults, k) && K.same(changed[k], gamesDefaults[k])));
+    }
     const order = schema ? (schema.sections || []).map((s) => s.name) : ["run", "model", "selfplay", "warmstart", "train"];
     for (const key of Object.keys(config)) if (!order.includes(key)) order.push(key);
+    const against = games ? "the defaults for training from games" : "the defaults";
     panel.appendChild(h("p", { class: "run-settings-lede" }, changedKeys.length
-      ? [`${changedKeys.length} setting${changedKeys.length === 1 ? " differs" : "s differ"} from the defaults: `,
+      ? [`${changedKeys.length} setting${changedKeys.length === 1 ? " differs" : "s differ"} from ${against}: `,
         changedKeys.map((k, i) => [i ? ", " : "", h("code", { class: "mono" }, k)]), "."]
-      : "Every setting is at its default."));
+      : `Every setting is at ${against === "the defaults" ? "its default" : against}.`,
+    games ? ` Only the settings that apply to training from games are listed.${state.detail.run.game_set ? ` The game set is ${state.detail.run.game_set}.` : ""}` : null));
     const columns = h("div", { class: "run-settings-columns" });
     for (const sectionName of order) {
       const values = config[sectionName];
       if (!values) continue;
       const section = schema ? (schema.sections || []).find((s) => s.name === sectionName) : null;
       // The run's name and folder are the app's own business and are in the page header.
-      const rows = Object.entries(values).filter(([field]) => !(sectionName === "run" && (field === "name" || field === "out_dir"))).map(([field, value]) => {
+      const entries = Object.entries(values).filter(([field]) => !(sectionName === "run" && (field === "name" || field === "out_dir")) &&
+        applies(`${sectionName}.${field}`));
+      if (!entries.length) continue;
+      const rows = entries.map(([field, value]) => {
         const key = `${sectionName}.${field}`;
         const meta = schemaField(schema, key);
-        const isChanged = Object.prototype.hasOwnProperty.call(changed, key) && key !== "run.name";
+        const isChanged = games
+          ? key !== "offline.games" && (meta ? !K.same(value, defaultOf(key, meta)) : Object.prototype.hasOwnProperty.call(changed, key))
+          : Object.prototype.hasOwnProperty.call(changed, key) && key !== "run.name";
         return h("tr", { class: isChanged ? "run-setting-changed" : null, title: meta && meta.help ? meta.help : null },
           h("td", null, h("div", { class: "run-setting-label" }, meta ? meta.label : field), h("div", { class: "run-setting-key" }, key)),
           h("td", { class: "run-setting-value" },
             h("div", { class: "run-setting-line" },
               isChanged ? h("span", { class: "badge badge-info" }, "changed") : null,
               h("span", { class: "mono" }, settingValue(value))),
-            isChanged && meta && meta.default !== undefined
-              ? h("div", { class: "run-setting-default" }, "default ", h("span", { class: "mono" }, settingValue(meta.default))) : null));
+            isChanged && meta && defaultOf(key, meta) !== undefined
+              ? h("div", { class: "run-setting-default" }, "default ", h("span", { class: "mono" }, settingValue(defaultOf(key, meta)))) : null));
       });
       columns.appendChild(h("div", { class: "card card-flush run-settings-card" },
         h("div", { class: "run-settings-head" }, h("h3", null, section ? section.title : SECTION_TITLES[sectionName] || sectionName)),
@@ -979,28 +1435,33 @@
 
   function renderCheckpoints(state, panel) {
     const d = state.detail;
+    const games = gamesMode(state);
     const evals = state.records.filter((r) => r.kind === "eval" && r.opponent === "greedy-leave");
     const evalAtStep = (step) => evals.filter((r) => r.step === step).pop();
     const rows = [];
     if (d.best) rows.push({ file: "best.pt", step: d.best.step, model_id: d.best.model_id, size_bytes: d.best.size_bytes, modified: d.best.modified, best: true });
     for (const c of d.checkpoints || []) rows.push(c);
+    const settings = (d.config || {})[games ? "offline" : "train"] || {};
     if (!rows.length) {
-      panel.appendChild(h("div", { class: "card" }, h("p", { class: "empty" }, h("strong", null, "No checkpoints yet."),
-        `The first is written ${(((d.config || {}).train || {}).checkpoint_minutes) || 10} minutes into training, and best.pt after the first evaluation.`)));
+      panel.appendChild(h("div", { class: "card" }, h("p", { class: "empty" }, h("strong", null, "No checkpoints yet."), games
+        ? `The first is written ${settings.checkpoint_minutes || "a few"} minutes into training (offline.checkpoint_minutes), and best.pt after the first match against the static evaluator.`
+        : `The first is written ${settings.checkpoint_minutes || 10} minutes into training, and best.pt after the first evaluation.`)));
       return;
     }
     const link = (href, text) => h("a", { class: "button button-small", href }, text);
     panel.appendChild(h("div", { class: "card card-flush" }, h("table", { class: "table run-ckpt-table" },
       h("thead", null, h("tr", null, h("th", null, "Checkpoint"), h("th", { class: "num" }, "Step"),
-        h("th", { class: "num" }, "Against greedy + leave"), h("th", { class: "num" }, "Size"), h("th", null, "Saved"), h("th", null, ""))),
+        h("th", { class: "num" }, games ? "Against the static evaluator" : "Against greedy + leave"), h("th", { class: "num" }, "Size"), h("th", null, "Saved"), h("th", null, ""))),
       h("tbody", null, rows.map((c) => {
         const ev = evalAtStep(c.step);
         const [spread, ci] = ev ? evalSpread(ev) : [null, null];
         const spec = encodeURIComponent("model:" + c.model_id);
+        const result = !ev ? h("span", { class: "muted" }, games ? "no match at this step" : "not evaluated")
+          : games ? (typeof ev.win_rate === "number" ? `${K.winText(ev.win_rate, ev.win_ci)} of games` : "–") : fmt.spread(spread, ci);
         return h("tr", { class: c.best ? "run-ckpt-best" : null },
           h("td", null, h("span", { class: "mono" }, c.file), c.best ? h("span", { class: "badge badge-good run-ckpt-badge" }, "Best") : null),
           h("td", { class: "num" }, fmt.int(c.step)),
-          h("td", { class: "num" }, ev ? fmt.spread(spread, ci) : h("span", { class: "muted" }, "not evaluated")),
+          h("td", { class: "num" }, result),
           h("td", { class: "num" }, c.size_bytes ? fmt.bytes(c.size_bytes) : "–"),
           h("td", null, c.modified ? fmt.datetime(c.modified) : "–"),
           h("td", { class: "run-ckpt-actions" },
@@ -1008,7 +1469,12 @@
             link(`#/watch?a=${spec}`, "Watch it play"),
             link(`#/arena?a=${spec}`, "Run a match")));
       })))));
-    const keep = (((d.config || {}).train || {}).keep_checkpoints) || 5;
+    if (games) {
+      panel.appendChild(h("p", { class: "dash-caption" }, (settings.keep_checkpoints ? `The newest ${settings.keep_checkpoints} step checkpoints are kept (offline.keep_checkpoints). ` : "") +
+        "best.pt is the network with the highest win rate against the static evaluator so far, kept separately. Each saved network is the running average of the weights, the one that plays."));
+      return;
+    }
+    const keep = settings.keep_checkpoints || 5;
     panel.appendChild(h("p", { class: "dash-caption" }, `The newest ${keep} step checkpoints are kept (train.keep_checkpoints). ` +
       "best.pt is the network that won its last gate against the previous best, kept separately."));
   }
@@ -1018,16 +1484,20 @@
   async function stopRun(state, els, force) {
     const run = state.detail.run;
     const queued = run.status === "queued";
+    const games = gamesMode(state);
+    const minutes = (((state.detail.config || {})[games ? "offline" : "train"] || {}).checkpoint_minutes) || 10;
     const ok = await App.confirm(force ? {
       title: `Force stop ${run.name}?`,
-      body: "This ends the process at once. Anything since the last checkpoint, up to 10 minutes of training, is lost.",
+      body: `This ends the process at once. Anything since the last checkpoint, up to ${fmt.int(minutes)} minutes of training, is lost.`,
       confirmLabel: "Force stop", danger: true,
     } : queued ? {
       title: `Take ${run.name} out of the queue?`, body: "It will not start. You can start it later with Resume once it has a checkpoint, or start a new run.",
       confirmLabel: "Remove from queue",
     } : {
       title: `Stop ${run.name}?`,
-      body: "The run finishes its current step, evaluates and saves a checkpoint, then stops. You can resume it later from that checkpoint.",
+      body: games
+        ? "The run finishes its current step, checks its held-out games, plays a match against the static evaluator and saves a checkpoint, then stops. You can resume it later from that checkpoint."
+        : "The run finishes its current step, evaluates and saves a checkpoint, then stops. You can resume it later from that checkpoint.",
       confirmLabel: "Stop run",
     });
     if (!ok) return;
@@ -1061,10 +1531,11 @@
       confirmLabel: "Delete run", danger: true,
     });
     if (!ok) return;
+    const back = gamesMode(state) ? "#/games" : "#/training";
     try {
       await App.del(`/api/runs/${enc(run.name)}`);
       App.toast(`${run.name} was deleted.`, "good");
-      App.go("#/training");
+      App.go(back);
     } catch (error) {
       App.toast(String(error.message || error), "critical");
     }
@@ -1084,6 +1555,7 @@
       if (schema) {
         const field = schemaField(schema, key);
         if (!field) throw new Error(`${key} is not a setting.`);
+        if (Array.isArray(field.modes) && !field.modes.includes("selfplay")) throw new Error(`${key} is a setting for training from games, not for a self-play run.`);
         if (field.locked_on_resume) throw new Error(`${key} cannot be changed when resuming.`);
       } else if (key.startsWith("model.")) throw new Error(`${key} cannot be changed when resuming.`);
       out[key] = value;
@@ -1091,7 +1563,53 @@
     return out;
   }
 
+  /** Resume for a run that trains from games: a time limit only, with the settings it started with. */
+  async function openResumeGames(state, els) {
+    const schema = await loadSchema(state);
+    const run = state.detail.run;
+    const hours = h("input", { class: "input", type: "number", min: "0", step: "0.5", id: "resume-hours",
+      value: String((run.limit && run.limit.hours) || 0) });
+    const error = h("p", { class: "dash-error", role: "alert" });
+    error.hidden = true;
+    let close = null;
+    const left = typeof run.pass === "number" && typeof run.passes === "number"
+      ? ` It has done ${fmt.fixed(run.pass, 1)} of its ${String(Number(run.passes.toPrecision(4)))} passes.` : "";
+    const submit = h("button", { class: "button button-primary", type: "submit" }, icon(ICON.play), "Resume");
+    const form = h("form", { class: "stack", novalidate: "", onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      const value = Number(hours.value);
+      if (hours.value.trim() === "" || !Number.isFinite(value) || value < 0) {
+        error.textContent = "Hours must be a number, 0 or more.";
+        error.hidden = false;
+        return;
+      }
+      submit.disabled = true;
+      try {
+        await App.post(`/api/runs/${enc(run.name)}/resume`, { hours: value });
+        close();
+        App.toast(`${run.name} resumed` + (value ? ` for ${fmt.duration(value)}.` : "."), "good");
+        await poll(state, els);
+      } catch (problem) {
+        const text = String(problem.message || problem).trim();
+        error.textContent = text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".");
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    } },
+    h("p", { class: "secondary" }, `The run continues from its newest checkpoint, with the settings and the game set it started with.${left}`),
+    h("label", { class: "field", for: "resume-hours" }, h("span", { class: "field-label" }, "Hours"), hours,
+      h("span", { class: "field-help" }, "0 means no time limit: it stops when its passes are done.")),
+    schema ? K.lockedNote(K.indexSchema(schema, "games").sections, "Fixed for the life of the run") : null,
+    error,
+    h("div", { class: "modal-actions" }, h("button", { class: "button", type: "button", onclick: () => close() }, "Cancel"), submit));
+    close = App.modal({ title: `Resume ${run.name}`, content: form });
+    App.onCleanup(() => { if (form.isConnected) close(); });
+    hours.focus();
+  }
+
   async function openResume(state, els) {
+    if (gamesMode(state)) { openResumeGames(state, els); return; }
     const schema = await loadSchema(state);
     const run = state.detail.run;
     const config = state.detail.config || {};

@@ -17,6 +17,7 @@ use scrabble_core::leave;
 use scrabble_core::lexicon::Lexicon;
 use scrabble_core::moves::{Move, Placed, Play};
 use scrabble_core::policy::{self, Bot, Candidate, Scratch};
+use scrabble_core::record;
 use scrabble_core::rng::Rng;
 use scrabble_core::validate;
 use scrabble_core::selfplay::{self, Player};
@@ -92,9 +93,33 @@ impl Engine {
         Ok(())
     }
 
-    /// Play each seed twice with the two bots swapping seats. Returns arrays with one entry per
-    /// seed: `spread_first` / `spread_second` (A's spread when moving first / second),
-    /// `score_a`, `score_b` and `turns` (each `[n, 2]`, flattened row-major).
+    /// Play `count` games by the static evaluator (score + leave value) with seeds from
+    /// `first_seed` on, their first plies varied (`record::Opening`), and return them as records:
+    /// `(bytes, lengths uint32[count], totals)`. The same arguments always give the same bytes.
+    #[pyo3(signature = (leaves, first_seed, count, opening_plies=4, opening_temperature=6.0, opening_top=16))]
+    #[allow(clippy::too_many_arguments)]
+    fn generate_games<'py>(
+        &self,
+        py: Python<'py>,
+        leaves: &LeaveModel,
+        first_seed: u64,
+        count: usize,
+        opening_plies: u8,
+        opening_temperature: f32,
+        opening_top: usize,
+    ) -> PyResult<(Bound<'py, pyo3::types::PyBytes>, Bound<'py, PyArray1<u32>>, Bound<'py, PyDict>)> {
+        let opening = record::Opening { max_plies: opening_plies, temperature: opening_temperature, top: opening_top };
+        let (gaddag, model) = (&*self.gaddag, &*leaves.model);
+        let (bytes, lengths, totals) = py.detach(|| record::generate(gaddag, model, first_seed, count, &opening));
+        let out = PyDict::new(py);
+        out.set_item("games", totals.games)?;
+        out.set_item("moves", totals.moves)?;
+        out.set_item("score_sum", totals.score_sum)?;
+        out.set_item("first_player_wins", totals.first_player_wins)?;
+        out.set_item("bingos", totals.bingos)?;
+        Ok((pyo3::types::PyBytes::new(py, &bytes), lengths.into_pyarray(py), out))
+    }
+
     /// How open each square of each board is to the next player: `boards uint8[n, 225]` and
     /// their cross masks `cross uint32[n, 450]` in, `out uint8[n, 225]` out (see `OPEN_TILES`
     /// and `OPEN_SEVEN`).
@@ -113,6 +138,9 @@ impl Engine {
         Ok(())
     }
 
+    /// Play each seed twice with the two bots swapping seats. Returns arrays with one entry per
+    /// seed: `spread_first` / `spread_second` (A's spread when moving first / second),
+    /// `score_a`, `score_b` and `turns` (each `[n, 2]`, flattened row-major).
     #[pyo3(signature = (bot_a, leaves_a, bot_b, leaves_b, seeds))]
     fn play_pairs<'py>(
         &self,
@@ -684,6 +712,71 @@ impl Game {
     }
 }
 
+/// A folder of saved games (`games.bin` and `index.bin`, see `scrabble_core::record`) opened for
+/// reading training positions at random.
+#[pyclass(frozen)]
+struct GameSet {
+    file: record::GameFile,
+}
+
+#[pymethods]
+impl GameSet {
+    /// `games`: read only the first that many games, the number the set's `meta.json` records
+    /// (the files may hold a block more, or a torn one, after a kill). Without it, every game
+    /// the files hold.
+    #[new]
+    #[pyo3(signature = (directory, games=None))]
+    fn new(directory: PathBuf, games: Option<usize>) -> PyResult<GameSet> {
+        Ok(GameSet { file: record::GameFile::open(&directory, games).map_err(value_error)? })
+    }
+
+    fn __len__(&self) -> usize {
+        self.file.len()
+    }
+
+    /// Game `index` as `(seed, [score0, score1], went_out, [move text, ...])`.
+    fn game(&self, index: usize) -> PyResult<(u64, Vec<i32>, bool, Vec<String>)> {
+        let game = self.file.read(index).map_err(value_error)?;
+        Ok((game.seed, game.scores.to_vec(), game.went_out, game.moves.iter().map(|m| m.to_string()).collect()))
+    }
+
+    /// One position from each of `games` (indices into the set), the turn chosen by `picks`
+    /// (each in [0, 1), spread evenly over the game's turns). Arrays for `n` positions:
+    /// `board uint8[n, 225]`, `leave uint8[n, 27]`, `unseen uint8[n, 27]`, `meta int16[n, META]`,
+    /// `leave_value float32[n]`, `targets float32[n, TARGETS]`, `squares uint8[n, 450]` (where
+    /// the opponent's next move, then the mover's own next move, placed tiles) and
+    /// `turns int32[n]`. `belief_samples` > 0 also infers what the mover could tell about the
+    /// opponent's rack, as during play.
+    #[allow(clippy::too_many_arguments)]
+    fn sample(
+        &self,
+        py: Python<'_>,
+        engine: &Engine,
+        leaves: &LeaveModel,
+        games: PyReadonlyArray1<'_, u64>,
+        picks: PyReadonlyArray1<'_, f32>,
+        belief_samples: usize,
+        mut board: PyReadwriteArray2<'_, u8>,
+        mut leave: PyReadwriteArray2<'_, u8>,
+        mut unseen: PyReadwriteArray2<'_, u8>,
+        mut meta: PyReadwriteArray2<'_, i16>,
+        mut leave_value: PyReadwriteArray1<'_, f32>,
+        mut targets: PyReadwriteArray2<'_, f32>,
+        mut squares: PyReadwriteArray2<'_, u8>,
+        mut turns: PyReadwriteArray1<'_, i32>,
+    ) -> PyResult<()> {
+        let (games, picks) = (games.as_slice()?, picks.as_slice()?);
+        let (board, leave, unseen, meta) = (board.as_slice_mut()?, leave.as_slice_mut()?, unseen.as_slice_mut()?, meta.as_slice_mut()?);
+        let (leave_value, targets, squares, turns) =
+            (leave_value.as_slice_mut()?, targets.as_slice_mut()?, squares.as_slice_mut()?, turns.as_slice_mut()?);
+        let (file, gaddag, model) = (&self.file, &*engine.gaddag, &*leaves.model);
+        py.detach(|| {
+            file.sample(gaddag, model, games, picks, belief_samples, board, leave, unseen, meta, leave_value, targets, squares, turns)
+        })
+        .map_err(value_error)
+    }
+}
+
 /// Parse a 15-line board and return its codes (`uint8[225]`), for tests and analysis.
 #[pyfunction]
 fn board_codes_from_text<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyArray1<u8>>> {
@@ -697,6 +790,16 @@ fn core_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LeaveModel>()?;
     m.add_class::<BatchEnv>()?;
     m.add_class::<Game>()?;
+    m.add_class::<GameSet>()?;
+    m.add("TARGETS", record::TARGETS)?;
+    m.add("T_WIN", record::T_WIN)?;
+    m.add("T_SPREAD", record::T_SPREAD)?;
+    m.add("T_OPP_SCORE", record::T_OPP_SCORE)?;
+    m.add("T_OPP_BINGO", record::T_OPP_BINGO)?;
+    m.add("T_HAS_OPP", record::T_HAS_OPP)?;
+    m.add("T_OWN_SCORE", record::T_OWN_SCORE)?;
+    m.add("T_OWN_BINGO", record::T_OWN_BINGO)?;
+    m.add("T_HAS_OWN", record::T_HAS_OWN)?;
     m.add_function(wrap_pyfunction!(board_codes_from_text, m)?)?;
 
     m.add("SQUARES", SQUARES)?;

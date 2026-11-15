@@ -4,8 +4,9 @@ Test modules load them with `pytest_plugins = ["app_fixtures"]`, so pytest regis
 and the session-scoped training run below happens once per test session.
 
 Nothing here touches the repo's runs/ or data/ folders, starts a detached process or kills one:
-`spawned` replaces `spawn_detached` (in runs.py and in the name matches.py imported) with a
-recorder that returns a fake pid, and `kill_process` with one that only records the pid.
+`spawned` replaces `spawn_detached` (in runs.py and in the names matches.py and gamesets.py
+imported) with a recorder that returns a fake pid, and `kill_process` (in runs.py and gamesets.py)
+with one that only records the pid.
 """
 
 from __future__ import annotations
@@ -110,6 +111,7 @@ class Spawner:
 
 @pytest.fixture
 def spawned(monkeypatch):
+    from scrabble_ai.app import gamesets as gamesets_module
     from scrabble_ai.app import matches as matches_module
     from scrabble_ai.app import runs as runs_module
 
@@ -117,6 +119,9 @@ def spawned(monkeypatch):
     monkeypatch.setattr(runs_module, "spawn_detached", spawner)
     monkeypatch.setattr(matches_module, "spawn_detached", spawner)
     monkeypatch.setattr(runs_module, "kill_process", spawner.kill)
+    # gamesets.py imported both by name, so they are replaced there too.
+    monkeypatch.setattr(gamesets_module, "spawn_detached", spawner)
+    monkeypatch.setattr(gamesets_module, "kill_process", spawner.kill)
     return spawner
 
 

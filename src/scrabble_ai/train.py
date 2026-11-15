@@ -164,7 +164,7 @@ class Trainer:
         return Actor(self.engine, self.leaves, self.replay, c.selfplay.games, c.selfplay.max_candidates,
                      c.selfplay.max_exchanges, c.train.td_lambda, self.device,
                      first_seed=self.seed_base + 500_000_000, sampling_seed=c.run.seed + 1,
-                     belief_samples=c.model.belief_samples)
+                     belief_samples=c.model.belief_samples, q_learning=c.train.target == "q")
 
     def _scorer(self, net: ValueNet) -> Scorer:
         return Scorer(net, self.engine, self.config.train.value_scale, self.device, self.config.train.amp)
@@ -250,7 +250,7 @@ class Trainer:
                           min(self.config.selfplay.max_exchanges, warm.max_candidates - 2),
                           self.config.train.td_lambda, self.device,
                           first_seed=self.warm_next_seed, sampling_seed=self.config.run.seed + 2 + self.warm_games,
-                          belief_samples=self.config.model.belief_samples)
+                          belief_samples=self.config.model.belief_samples, q_learning=self.config.train.target == "q")
             self._say(f"warm start: {warm.games - self.warm_games:,} games by the static evaluator "
                       f"(temperature {warm.temperature})")
             stats, start, last = ActorStats(), time.time(), time.time()
@@ -499,8 +499,10 @@ class Trainer:
 
     def run(self) -> None:
         run, train, sp = self.config.run, self.config.train, self.config.selfplay
+        from scrabble_ai.app.procs import clear_stale_stop
+
         stop_file = self.run_dir / "STOP"
-        stop_file.unlink(missing_ok=True)
+        clear_stale_stop(stop_file)  # one written while this process was starting up still counts
         session_start = time.time()
         deadline = session_start + run.hours * 3600 if run.hours > 0 else float("inf")
 

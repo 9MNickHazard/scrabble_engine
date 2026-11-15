@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from scrabble_ai.config import Config
+from scrabble_ai.config import OFFLINE_DEFAULTS, Config
 
 
 def _f(label: str, what: str, lower: str, higher: str, typical: str = "", **extra) -> dict:
@@ -121,8 +121,37 @@ _FIELDS: dict[str, dict] = {
         "had and weighs each by how good the move played would have been with it. The expected tiles on the "
         "opponent's rack are then an input. 0 leaves the input out.",
         "Cheaper and a rougher estimate. 0: no inference, and the network has no such input.",
-        "A steadier estimate. Each sample is one full move generation per move played, so self-play slows down.",
+        "A steadier estimate. Each sample is one full move generation per move played, so self-play slows down; "
+        "when training from games it sets the pace: 11,500 positions a second were read with 4 racks, against "
+        "187,000 with none.",
         "0, or 4 to 12", min=0, max=64, step=1, locked=True),
+    "model.kind": _f(
+        "Kind of network", "The body of the network. cnn: residual blocks of 3 x 3 convolutions. cnn-global: the same "
+        "with board-wide pooling in every third block, so each square is told about the whole board (from KataGo). "
+        "transformer: one token per square and layers of attention, in which every square can look at every other; "
+        "Residual blocks is then the number of layers and Channels the width of a token.",
+        "cnn and cnn-global: fast. In the one published comparison on Scrabble, convolutional networks of 64 to 128 "
+        "channels all stopped at about 52.5% of games against the static evaluator.",
+        "transformer: the kind behind the strongest published Scrabble value networks (57.65%, at 8 layers of 192), "
+        "which also had the helper outputs. Several times slower; not timed here yet.",
+        "cnn first; then transformer at 8 blocks x 192 channels", options=["cnn", "cnn-global", "transformer"], locked=True),
+    "model.head": _f(
+        "Head", "How the outputs read the board. flat: through a layer with a weight for every square, which is where "
+        "the first networks learned particular boards by heart. pooled: through each channel's average and maximum "
+        "over the board only.",
+        "flat: what every network before 15 November 2026 has.",
+        "pooled: far fewer weights (about 610,000 in a 6x64 network against 1.07 million) and nothing that can "
+        "memorise a board square by square.", "pooled for training from games", options=["flat", "pooled"], locked=True),
+    "model.win_head": _f(
+        "Win output", "binary: one number, the chance of winning. wdl: three, for win, draw and loss.",
+        "binary: what every earlier network has.", "wdl: the output training from games is built around.",
+        "wdl for training from games", options=["binary", "wdl"], locked=True),
+    "model.aux_heads": _f(
+        "Helper outputs", "Extra outputs used only as training signal: the opponent's next score, whether they place "
+        "all seven tiles, and where the next two moves land. They are never used to choose a move.",
+        "Off: the network learns from the result of the game alone.",
+        "On: in the published Scrabble results these were the largest single gain, about four points of win rate, "
+        "measured on a transformer. Only training from games teaches them.", "on for training from games", locked=True),
     # ---- selfplay ----------------------------------------------------------------------------
     "selfplay.games": _f(
         "Games in lockstep", "Self-play games advanced together.",
@@ -218,6 +247,14 @@ _FIELDS: dict[str, dict] = {
         "Win loss weight", "Weight of the win-probability loss relative to the value loss.",
         "The win estimate gets less attention; 0 leaves it untrained.", "More of the network's effort goes to predicting wins.",
         "0.25 to 1", min=0, max=10, step=0.1),
+    "train.target": _f(
+        "Learning rule", "What each position learns from. td: what followed in its own game, as TD lambda sets out. "
+        "q: deep Q-learning: the best move the network believes the opponent has next, with the self-play copy of "
+        "the network as the target network.",
+        "td: learns from moves that were played. Steadier.",
+        "q: learns from the move rated best, whether or not it was played. It takes a maximum over many uncertain "
+        "ratings, which overstates them: watch the edge over leave values for it.",
+        "td, or q to compare", options=["td", "q"]),
     "train.td_lambda": _f(
         "TD lambda", "How far ahead the training targets look. At 1 the target is the spread actually gained by the "
         "end of the game; below 1 it leans on the estimate of the next position.",
@@ -282,6 +319,77 @@ _FIELDS: dict[str, dict] = {
         "Checkpoints kept", "Full checkpoints kept on disk. The best network is always kept.",
         "Less disk used.", "More history to go back to, at 20 to 75 MB each.",
         "3 to 10", min=1, max=1000, step=1),
+    # ---- offline: training from saved games ----------------------------------------------------
+    "offline.games": _f(
+        "Game set", "The saved games to learn from: a set made on this page.",
+        "A smaller set: in the published results 5.4 million games were too few (50.98% against the static "
+        "evaluator).", "A larger set: about 20 million games reached 53.1%, and doubling that added nothing without "
+        "the helper outputs.", "a set of 20 million games or more", advanced=False, locked=True),
+    "offline.passes": _f(
+        "Passes", "Times through the game set. Each pass takes one position from every game, a different one each time.",
+        "Sooner done; fewer positions seen.", "More positions from the same games. The published recipe used 6.",
+        "4 to 8", min=0.01, max=100, step=1, advanced=False),
+    "offline.batch_size": _f(
+        "Batch size", "Positions per training step.",
+        "More, noisier updates per pass.", "Fewer, smoother updates; more GPU memory.",
+        "1,024 to 4,096", min=16, max=16384, step=256, locked=True),
+    "offline.learning_rate": _f(
+        "Learning rate", "Step size at its peak. It ramps up over the warm-up, then falls along a cosine to a "
+        "twentieth of this by the last step.",
+        "Slower, steadier.", "Faster; too high and the loss on held-out games stops falling.",
+        "0.0001 to 0.001", min=1e-6, max=1.0, step=0.0001),
+    "offline.warmup_steps": _f(
+        "Warm-up steps", "Steps over which the learning rate ramps up from zero.",
+        "Full speed sooner.", "A gentler start.", "200 to 2,000", min=0, max=100_000, step=100),
+    "offline.weight_decay": _f(
+        "Weight decay", "Pulls the weights towards zero at every step.",
+        "Less restraint.", "More restraint; too much and the network cannot fit.", "0.00001 to 0.001", min=0, max=1, step=0.0001),
+    "offline.grad_clip": _f(
+        "Gradient clip", "Maximum gradient norm. 0 turns clipping off.",
+        "Caps large updates harder.", "Lets large updates through.", "0.5 to 5", min=0, max=100, step=0.5),
+    "offline.validation_games": _f(
+        "Held-out games", "Games kept out of training, to measure the loss on games never learned from. At most a "
+        "tenth of the set.",
+        "Almost every game is trained on; the measurement is rougher.", "A steadier measurement; fewer games to train on.",
+        "10,000 to 50,000", min=0, max=10_000_000, step=5_000, locked=True),
+    "offline.validate_steps": _f(
+        "Check every", "Training steps between measurements on the held-out games.",
+        "A finer curve; a little time each.", "A coarser curve.", "200 to 2,000", min=1, max=1_000_000, step=100),
+    "offline.aux_share": _f(
+        "Helper pull", "Each helper output's pull on the network, as a share of the main output's. The weights are "
+        "re-measured as training goes. 0 uses the two fixed weights below instead.",
+        "Helpers matter less. In the published results fixed weights let one helper out-pull the main output and "
+        "cost 1.4 points of win rate.", "Helpers matter more, at the main output's expense.",
+        "0.1 to 0.25", min=0, max=1, step=0.05),
+    "offline.spread_weight": _f(
+        "Points weight", "Fixed weight of the points output, used only when Helper pull is 0.",
+        "Points matter less.", "Points matter more.", "0.1 to 0.5", min=0, max=10, step=0.05),
+    "offline.aux_weight": _f(
+        "Helper weight", "Fixed weight of each other helper output, used only when Helper pull is 0.",
+        "Helpers matter less.", "Helpers matter more.", "0.05 to 0.3", min=0, max=10, step=0.05),
+    "offline.eval_minutes": _f(
+        "Play the static bot every", "How often the network plays the static evaluator. The best network is the one "
+        "with the highest win rate in these matches.",
+        "More readings; each takes the GPU from training.", "Fewer readings.", "20 to 60", min=0.5, max=600, step=5),
+    "offline.eval_pairs": _f(
+        "Pairs per match", "Seat-swapped pairs in each of those matches.",
+        "Quicker and vaguer.", "Slower and sharper: 2,000 pairs give about +/- 1.3 points of win rate, 20,000 about "
+        "+/- 0.4.", "2,000 to 5,000", min=2, max=1_000_000, step=500),
+    "offline.final_pairs": _f(
+        "Pairs in the final match", "Pairs in the match played when every pass is done.",
+        "A rougher final figure.", "A sharper one: 10,000 pairs give about +/- 0.6 points of win rate.",
+        "10,000 to 50,000", min=2, max=1_000_000, step=1_000),
+    "offline.checkpoint_minutes": _f(
+        "Checkpoint every", "How often the training state is saved.",
+        "Less lost if the run dies.", "Fewer saves.", "10 to 30", min=0.5, max=600, step=1),
+    "offline.keep_checkpoints": _f(
+        "Checkpoints kept", "Step files kept on disk. The best network is always kept.",
+        "Less disk used.", "More history.", "2 to 5", min=1, max=1000, step=1),
+    "offline.augment_transpose": _f(
+        "Transpose augmentation", "Randomly swap rows and columns: the one exact symmetry of the board.",
+        "Off: half the variety.", "On: the default.", "on"),
+    "offline.amp": _f(
+        "Mixed precision", "bf16 autocast.", "Off: full precision; slower and more memory.", "On: the default.", "on"),
 }
 
 # What a number counts, shown beside its input.
@@ -308,12 +416,38 @@ _UNITS = {
     "train.gate_pairs": "pairs",
     "train.guard_patience": "evaluations",
     "model.belief_samples": "racks",
+    "offline.batch_size": "positions",
+    "offline.warmup_steps": "steps",
+    "offline.validation_games": "games",
+    "offline.validate_steps": "steps",
+    "offline.eval_minutes": "minutes",
+    "offline.eval_pairs": "pairs",
+    "offline.final_pairs": "pairs",
+    "offline.checkpoint_minutes": "minutes",
 }
 
 # The form asks for the name itself, and the app decides where runs live.
 HIDDEN = {"run.name", "run.out_dir"}
 
-_SECTION_TITLES = {"run": "Run", "model": "Network", "selfplay": "Self-play", "warmstart": "Warm start", "train": "Training"}
+_SECTION_TITLES = {"run": "Run", "model": "Network", "selfplay": "Self-play", "warmstart": "Warm start", "train": "Training",
+                   "offline": "Training from games"}
+
+# Which way of training a setting belongs to: self-play, training from saved games, or both. The
+# two forms each show only their own.
+_GAMES_TOO = {"selfplay.max_candidates", "selfplay.max_exchanges", "selfplay.win_weight", "selfplay.win_scale",
+              "train.value_scale", "train.huber_delta"}
+
+
+def _modes(key: str) -> list[str]:
+    section = key.partition(".")[0]
+    if section == "offline":
+        return ["games"]
+    if key == "run.max_games":
+        return ["selfplay"]  # training from games ends when its passes are done
+    if section in ("run", "model") or key in _GAMES_TOO:
+        return ["selfplay", "games"]
+    return ["selfplay"]
+
 
 PRESETS = [
     {"name": "Default 6x64", "description": "The size to get working first. About 57 games a second with the earlier inputs; not timed with the new ones yet.", "overrides": {}},
@@ -322,9 +456,26 @@ PRESETS = [
     {"name": "Wide 12x192", "description": "A weekend run: an estimated 8.5 games a second. Fewer candidates and a shorter exploration decay to suit.",
      "overrides": {"model.blocks": 12, "model.channels": 192, "selfplay.max_candidates": 32,
                    "selfplay.temperature_decay_games": 100_000}},
+    {"name": "Deep Q-learning 6x64", "description": "The default network, learning by Q-learning: each position learns "
+     "from the move the network rates best for the opponent, not from the move that was played.",
+     "overrides": {"train.target": "q"}},
     {"name": "Quick test (30 minutes)", "description": "A short run to check everything works. Too short to learn much.",
      "overrides": {"run.hours": 0.5, "warmstart.games": 20_000, "warmstart.steps": 400,
                    "selfplay.temperature_decay_games": 50_000, "train.eval_minutes": 10.0}},
+]
+
+# Starting points for training from saved games. Each is applied on top of OFFLINE_DEFAULTS.
+GAMES_PRESETS = [
+    {"name": "CNN 6x64", "description": "The fastest to train and to play. Convolutional networks stopped near 52.5% "
+     "against the static evaluator in the published results, without the helper outputs this one has.", "overrides": {}},
+    {"name": "CNN with board-wide pooling 6x64", "description": "The same with KataGo's global pooling, so every "
+     "square is told about the whole board. Hardly slower. Not tried on Scrabble by anyone yet.",
+     "overrides": {"model.kind": "cnn-global"}},
+    {"name": "Transformer 8x192", "description": "The shape of the strongest published Scrabble value networks "
+     "(57.65% against the static evaluator). Several times slower to train and to play; not timed here yet.",
+     "overrides": {"model.kind": "transformer", "model.blocks": 8, "model.channels": 192}},
+    {"name": "Quick test", "description": "A tenth of a pass with short matches, to check everything works.",
+     "overrides": {"offline.passes": 0.1, "offline.eval_pairs": 200, "offline.final_pairs": 500, "offline.validate_steps": 100}},
 ]
 
 # Speeds on the RTX 5070 Ti (docs/BENCHMARKS.md). 6x64 and 10x128 are whole-run averages from the
@@ -377,9 +528,11 @@ def schema() -> dict:
                 "locked_on_resume": described.get("locked", False),
                 "help": described["help"],
                 "effects": {"lower": described["lower"], "higher": described["higher"], "typical": described["typical"]},
+                "modes": _modes(key),
             })
         sections.append({"name": section_field.name, "title": _SECTION_TITLES[section_field.name], "fields": fields})
-    return {"sections": sections, "presets": PRESETS, "speed": SPEED}
+    return {"sections": sections, "presets": PRESETS, "speed": SPEED, "games_presets": GAMES_PRESETS,
+            "games_defaults": dict(OFFLINE_DEFAULTS)}
 
 
 def described_keys() -> set[str]:

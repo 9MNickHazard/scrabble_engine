@@ -887,3 +887,52 @@ div.ov-progress-text.muted { margin: 16px 0 18px; color: var(--text-muted); }
 .tm-effect-k { font-weight: 650; color: var(--text-secondary); }
 
 /* ---- end run health, verdict, rename, tuning guide ---- */
+
+/* ---- train from games ----
+ * The Train from games page (#/games): the game sets (step 1), the form that trains a network on
+ * one (step 2, made of the Training form's tm- pieces) and the runs trained from games. Every
+ * class in this block starts with gm-.
+ */
+.page-head .gm-lede { max-width: 112ch; }
+.gm-step { display: inline-flex; align-items: center; height: 20px; margin-bottom: 6px; padding: 0 9px; border: 1px solid var(--outline);
+  border-radius: var(--radius-pill); background: var(--accent-wash); color: var(--text-primary); font-size: var(--text-xs); font-weight: 650; }
+.gm-card-head { padding: var(--space-5) var(--space-5) var(--space-4); border-bottom: 1px solid var(--border); }
+.gm-card-head .card-sub, .gm-train .tm-new-head .card-sub { max-width: 100ch; margin-top: 2px; }
+.gm-sets-table td { vertical-align: middle; }
+.gm-set-cell { min-width: 230px; }
+.gm-set-name { font-weight: 650; color: var(--text-primary); }
+.gm-progress { justify-content: flex-end; }
+.gm-empty { padding: var(--space-5) var(--space-4); }
+
+.gm-make { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--border-strong); }
+.gm-make-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); max-width: 640px; }
+.gm-quick-wrap { display: flex; flex-direction: column; gap: 4px; }
+.gm-more { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.gm-more-body { display: grid; flex-basis: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); max-width: 880px; padding: var(--space-1) 0 0 26px; }
+.gm-more-body .tm-num { max-width: 200px; }
+.gm-more-note { grid-column: 1 / -1; }
+.gm-estimate { max-width: 880px; }
+.gm-note { display: flex; align-items: flex-start; gap: 6px; max-width: 880px; font-size: var(--text-s); line-height: 1.5; color: var(--text-secondary); }
+.gm-note .tm-icon { margin-top: 2px; color: color-mix(in srgb, var(--warning) 70%, var(--text-primary)); }
+.gm-make-actions { display: flex; gap: var(--space-2); }
+.gm-log { min-height: 240px; max-height: 60vh; }
+
+.gm-setcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); }
+.gm-setcard-games { font-size: var(--text-s); font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.gm-noset > .tm-icon { margin-top: 1px; color: var(--text-muted); }
+.gm-models { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.gm-runcard { cursor: default; }
+.gm-plan { gap: 4px var(--space-3); font-size: var(--text-s); }
+.gm-plan dt { color: var(--text-secondary); }
+.gm-plan dd { text-align: right; font-weight: 650; color: var(--text-primary); }
+.gm-plan dd .muted { font-weight: 400; }
+.gm-warnings { display: flex; flex-direction: column; gap: 4px; }
+.gm-runs-table .tm-name-cell { min-width: 170px; max-width: 230px; }
+.gm-runs-table .tm-name-cell .tm-sub { white-space: normal; }
+@media (max-width: 900px) { .gm-make-grid, .gm-more-body { grid-template-columns: 1fr; } }
+/* Elsewhere, networks trained from games are shown by their win rate: on Models under the
+ * "vs greedy-leave" column, and on Overview in a list of their own under the strongest networks. */
+.tm-win-cell { display: inline-flex; flex-direction: column; align-items: flex-end; }
+.ov-strongest-wins { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border); }
+.ov-strongest-sub { margin-bottom: var(--space-2); }
+/* ---- end train from games ---- */

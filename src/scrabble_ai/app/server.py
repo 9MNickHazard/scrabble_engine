@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from scrabble_ai import __version__
 from scrabble_ai import engine as engine_module
 from scrabble_ai.app import schema as schema_module
+from scrabble_ai.app.gamesets import GameSets
 from scrabble_ai.app.library import Library
 from scrabble_ai.app.matches import Matches, renamed_spec
 from scrabble_ai.app.players import NotFound, PlayerError, Players
@@ -63,6 +64,7 @@ class AppState:
         demos point them elsewhere. `loaded` is the engine and leave values to use."""
         self.loaded = loaded or engine_module.load(allow_missing_leaves=True)
         self.runs = RunManager(runs_dir, app_dir)
+        self.gamesets = GameSets(self.runs.games_dir)
         self.players = Players(self.loaded, runs_dir)
         self.library = Library(self.runs, self.loaded, app_dir)
         self.sessions = Sessions(self.players)
@@ -122,7 +124,8 @@ def _report(state: AppState, name: str) -> dict:
 
     if not state.runs.exists(name):
         raise NotFound(f"there is no run named {name!r}")
-    report = insights.run_report(name, state.runs.records(name), state.runs.config(name))
+    make = insights.games_report if state.runs.mode(name) == "games" else insights.run_report
+    report = make(name, state.runs.records(name), state.runs.config(name))
     summary = state.runs.summary(name)
     if summary["status"] == "failed":
         # The log has no stop record for a run that died, so the report cannot know: add it here.
@@ -164,6 +167,23 @@ def _start_runs(state: AppState, body: dict) -> dict:
     if not isinstance(mode, str):
         raise RunError("mode must be 'parallel' or 'queue'")
     return state.runs.start(specs, mode)
+
+
+def _start_gameset(state: AppState, body: dict) -> dict:
+    name = body.get("name")
+    if not isinstance(name, str):
+        raise RunError("a game set needs a name")
+    if state.loaded.leaves_path is None:
+        raise RunError("leave values have not been fitted yet: run `uv run scrabble-ai fit-leaves` first")
+    return state.gamesets.start(name, body.get("games"), body.get("opening_plies"), body.get("opening_temperature"))
+
+
+def _stop_gameset(state: AppState, name: str, body: dict) -> dict:
+    force = body.get("force", False)
+    if not isinstance(force, bool):
+        raise RunError("force must be true or false")
+    state.gamesets.stop(name, force)
+    return {"ok": True}
 
 
 def _stop_run(state: AppState, name: str, body: dict) -> dict:
@@ -245,6 +265,13 @@ ROUTES = [
     ("POST", r"/api/runs/([^/]+)/rename", lambda s, m, b, q: _rename_run(s, m[1], b)),
     ("POST", r"/api/runs/([^/]+)/resume",
      lambda s, m, b, q: s.runs.resume(_run_or_404(s, m[1]), b.get("hours"), b.get("max_games"), b.get("overrides"))),
+    ("GET", r"/api/gamesets", lambda s, m, b, q: s.gamesets.list()),
+    ("POST", r"/api/gamesets", lambda s, m, b, q: _start_gameset(s, b)),
+    ("GET", r"/api/gamesets/([^/]+)", lambda s, m, b, q: s.gamesets.summary(m[1])),
+    ("GET", r"/api/gamesets/([^/]+)/log",
+     lambda s, m, b, q: {"lines": s.gamesets.log(m[1], _integer(q.get("tail", 200), "tail", 0, 5000))}),
+    ("POST", r"/api/gamesets/([^/]+)/stop", lambda s, m, b, q: _stop_gameset(s, m[1], b)),
+    ("DELETE", r"/api/gamesets/([^/]+)", lambda s, m, b, q: (s.gamesets.delete(m[1], s.runs.using_games(m[1])), {"ok": True})[1]),
     ("GET", r"/api/models", lambda s, m, b, q: s.library.models()),
     ("POST", r"/api/models/([^/]+/[^/]+)/meta", lambda s, m, b, q: s.library.set_meta(m[1], b.get("starred"), b.get("note"))),
     ("GET", r"/api/matches", lambda s, m, b, q: {"matches": s.matches.list()}),

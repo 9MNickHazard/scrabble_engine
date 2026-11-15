@@ -12,6 +12,7 @@ pub mod lexicon;
 pub mod movegen;
 pub mod moves;
 pub mod policy;
+pub mod record;
 pub mod rng;
 pub mod selfplay;
 pub mod tiles;

@@ -20,6 +20,11 @@
  * POST /api/runs/<name>/rename renames a run here and tells js/mock/library.js (App.emit
  * "mock:rename") so the models follow.
  *
+ * Runs that train from saved games are simulated by js/mock/offline.js and registered here
+ * through window.MockTraining, so they are in the same list and answer the same endpoints;
+ * POST /api/runs hands it the runs whose overrides name a game set (`offline.games`). Self-play
+ * summaries carry `mode: "selfplay"` and null games fields, as docs/APP_API.md describes.
+ *
  * GET /api/models belongs to js/mock/library.js; a small fallback here answers it only when no
  * other mock file does (see `fallback` below).
  */
@@ -98,6 +103,29 @@
   // ---- Runs: a small simulator that writes metrics records like train.py does ------------
 
   const runs = [];
+
+  // Runs simulated by another mock file (js/mock/offline.js: runs that train from saved games)
+  // live in the same list of runs and answer the same endpoints. Each is an object with `name`,
+  // `status`, `created` and `records` (its metrics), and summary(), detail(), log(), report(), stop(force),
+  // resume(body), rename(to), advance(minutes) (returns true when the run has just finished) and
+  // start() (for a queued run). Errors are returned as {error}.
+  const external = [];
+  const extFind = (name) => external.find((r) => r.name === decodeURIComponent(name));
+  const isActive = (status) => status === "running" || status === "stopping";
+  const anyActive = () => runs.some((r) => isActive(r.status)) || external.some((r) => isActive(r.status));
+  let createExternal = null;
+  window.MockTraining = {
+    add(run) { external.push(run); },
+    /** handler(item, startNow) -> a new external run, or {error}: for POST /api/runs items whose
+     *  overrides name a game set. */
+    onCreate(handler) { createExternal = handler; },
+    taken(name) {
+      const lower = String(name).toLowerCase();
+      return runs.some((r) => r.spec.name.toLowerCase() === lower) || external.some((r) => r.name.toLowerCase() === lower);
+    },
+    anyActive,
+    startNextQueued: () => startNextQueued(),
+  };
 
   function newRun(spec) {
     const config = configOf(spec.name, spec.changed || {});
@@ -389,15 +417,18 @@
         }
       }
     }
+    for (const run of external.slice()) {
+      if (run.advance(Math.min(minutes, 6))) startNextQueued();
+    }
   }
 
   function startNextQueued() {
-    if (runs.some((r) => r.status === "running" || r.status === "stopping")) return;
-    const next = runs.filter((r) => r.status === "queued").sort((a, b) => a.spec.created - b.spec.created)[0];
-    if (next) {
-      next.live = true;
-      startSession(next);
-    }
+    if (anyActive()) return;
+    const waiting = [
+      ...runs.filter((r) => r.status === "queued").map((r) => ({ created: r.spec.created, start: () => { r.live = true; startSession(r); } })),
+      ...external.filter((r) => r.status === "queued").map((r) => ({ created: r.created, start: () => r.start() })),
+    ].sort((a, b) => a.created - b.created);
+    if (waiting.length) waiting[0].start();
   }
 
   // ---- Shapes the API returns -----------------------------------------------------------
@@ -477,15 +508,15 @@
       progress: run.limitHours ? round(Math.min(1, sessionHours / run.limitHours), 4) : null,
       latest_eval: gl ? {
         games: gl.games,
-        "greedy-leave": { spread: gl.spread, ci: gl.spread_ci, win_rate: gl.win_rate },
-        greedy: g ? { spread: g.spread, ci: g.spread_ci, win_rate: g.win_rate } : null,
+        "greedy-leave": { spread: gl.spread, ci: gl.spread_ci, win_rate: gl.win_rate, win_ci: OLD ? null : gl.win_ci },
+        greedy: g ? { spread: g.spread, ci: g.spread_ci, win_rate: g.win_rate, win_ci: OLD ? null : g.win_ci } : null,
       } : null,
       best_step: s.best ? s.best.step : null,
       has_best: !!s.best,
       checkpoints: s.checkpoints.length,
       changed: Object.assign({}, run.spec.changed),
       error: run.error,
-    }, extra);
+    }, extra, OLD ? {} : { mode: "selfplay", game_set: null, total_steps: null, passes: null, pass: null, positions_per_second: null });
   }
 
   function checkpointList(run) {
@@ -949,22 +980,25 @@
 
   App.mock.on("GET", /^\/api\/status$/, () => {
     tick();
-    const active = runs.filter((r) => r.status === "running" || r.status === "stopping");
+    const active = [...runs.filter((r) => isActive(r.status)), ...external.filter((r) => isActive(r.status))];
+    const queued = [...runs.filter((r) => r.status === "queued").map((r) => r.spec.name), ...external.filter((r) => r.status === "queued").map((r) => r.name)];
     return {
       version: "0.1.0",
       lexicon: { id: "NSWL2023-91a67230e1f6", words: 195747 },
       leaves: { ok: true, file: "NSWL2023-91a67230e1f6.leaves" },
       gpu: { name: "NVIDIA GeForce RTX 5070 Ti", utilization: active.length ? 84 + Math.round(6 * Math.random()) : 3,
         memory_used_mb: active.length ? 2140 : 610, memory_total_mb: 16303, temperature_c: active.length ? 61 : 38 },
-      active_runs: active.map((r) => r.spec.name),
-      queued_runs: runs.filter((r) => r.status === "queued").map((r) => r.spec.name),
+      active_runs: active.map((r) => (r.spec ? r.spec.name : r.name)),
+      queued_runs: queued,
       active_matches: matches.filter((m) => gamesDone(m) >= 0 && m.status === "running").map((m) => m.id),
     };
   });
 
   App.mock.on("GET", /^\/api\/runs$/, () => {
     tick();
-    return { runs: runs.slice().sort((a, b) => b.spec.created - a.spec.created).map(summary) };
+    const all = [...runs.map((r) => ({ created: r.spec.created, summary: () => summary(r) })),
+      ...external.map((r) => ({ created: r.created, summary: () => r.summary() }))];
+    return { runs: all.sort((a, b) => b.created - a.created).map((r) => r.summary()) };
   });
 
   App.mock.on("POST", /^\/api\/runs$/, (match, body) => {
@@ -972,53 +1006,78 @@
     if (!list.length) return { error: "No runs given." };
     for (const item of list) {
       if (!/^[A-Za-z0-9_-]+$/.test(item.name || "")) return { error: `"${item.name}" is not a valid run name: use letters, digits, - and _.` };
-      if (findRun(item.name)) return { error: `A run called ${item.name} already exists.` };
+      if (window.MockTraining.taken(item.name)) return { error: `a run named '${item.name}' already exists` };
+      const games = item.overrides && item.overrides["offline.games"];
+      if (games && !createExternal) return { error: "there is no game set named " + games };
     }
     const started = [];
     const queued = [];
-    const busy = runs.some((r) => r.status === "running" || r.status === "stopping");
-    list.forEach((item, i) => {
+    const busy = anyActive() || runs.some((r) => r.status === "queued") || external.some((r) => r.status === "queued");
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
       const overrides = Object.assign({}, item.overrides || {});
+      const startNow = body.mode === "parallel" || (list.length === 1 && !busy);
+      if (overrides["offline.games"]) {
+        const made = createExternal(item, startNow, Date.now() / 1000 + i);
+        if (made && made.error) return { error: list.length > 1 ? `${item.name}: ${made.error}` : made.error };
+        (startNow ? started : queued).push(item.name);
+        continue;
+      }
       const run = newRun({ name: item.name, seed: 5000 + runs.length, created: Date.now() / 1000 + i, limitHours: Number(overrides["run.hours"]) || 0,
         gps: 55, tau: 2.4, gl: 6.5, gl0: -0.5, changed: overrides, status: "queued" });
       run.live = true;
-      if (body.mode === "parallel" || (i === 0 && !busy)) {
+      if (startNow) {
         startSession(run);
         started.push(item.name);
       } else queued.push(item.name);
-    });
+    }
+    // A queue starts its first run once nothing else is training, as the queue runner does.
+    startNextQueued();
     return { started, queued };
   });
 
   App.mock.on("GET", /^\/api\/runs\/([^/]+)$/, (match) => {
     tick();
+    const ext = extFind(match[1]);
+    if (ext) return ext.detail();
     const run = findRun(match[1]);
     return run ? detail(run) : noRun(match[1]);
   });
 
   App.mock.on("GET", /^\/api\/runs\/([^/]+)\/metrics$/, (match, body, query) => {
     tick();
+    const ext = extFind(match[1]);
     const run = findRun(match[1]);
-    if (!run) return noRun(match[1]);
+    if (!run && !ext) return noRun(match[1]);
+    const records = ext ? ext.records : run.records;
     const since = Math.max(0, parseInt(query.since || "0", 10) || 0);
-    return { records: run.records.slice(since), next: run.records.length };
+    return { records: records.slice(since), next: records.length };
   });
 
   App.mock.on("GET", /^\/api\/runs\/([^/]+)\/log$/, (match, body, query) => {
     tick();
+    const ext = extFind(match[1]);
     const run = findRun(match[1]);
-    if (!run) return noRun(match[1]);
+    if (!run && !ext) return noRun(match[1]);
     const tail = Math.max(1, parseInt(query.tail || "200", 10) || 200);
-    return { lines: logLines(run).slice(-tail) };
+    return { lines: (ext ? ext.log() : logLines(run)).slice(-tail) };
   });
 
   App.mock.on("GET", /^\/api\/runs\/([^/]+)\/report$/, (match) => {
     tick();
+    const ext = extFind(match[1]);
+    if (ext) return ext.report();
     const run = findRun(match[1]);
     return run ? report(run) : noRun(match[1]);
   });
 
   App.mock.on("POST", /^\/api\/runs\/([^/]+)\/stop$/, (match, body) => {
+    const ext = extFind(match[1]);
+    if (ext) {
+      const result = ext.stop(!!(body && body.force));
+      if (!result.error) startNextQueued();
+      return result;
+    }
     const run = findRun(match[1]);
     if (!run) return noRun(match[1]);
     if (run.status === "queued") {
@@ -1035,6 +1094,8 @@
   });
 
   App.mock.on("POST", /^\/api\/runs\/([^/]+)\/resume$/, (match, body) => {
+    const ext = extFind(match[1]);
+    if (ext) return ext.resume(body || {});
     const run = findRun(match[1]);
     if (!run) return noRun(match[1]);
     if (run.status === "running" || run.status === "stopping") return { error: `${run.spec.name} is already running.` };
@@ -1064,6 +1125,13 @@
   });
 
   App.mock.on("DELETE", /^\/api\/runs\/([^/]+)$/, (match) => {
+    const ext = extFind(match[1]);
+    if (ext) {
+      if (isActive(ext.status)) return { error: `${ext.name} is running; stop it first` };
+      external.splice(external.indexOf(ext), 1);
+      App.emit("mock:delete-run", { name: ext.name });
+      return { ok: true };
+    }
     const run = findRun(match[1]);
     if (!run) return noRun(match[1]);
     if (run.status === "running" || run.status === "stopping") return { error: `Stop ${run.spec.name} before deleting it.` };
@@ -1072,15 +1140,22 @@
   });
 
   App.mock.on("POST", /^\/api\/runs\/([^/]+)\/rename$/, (match, body) => {
+    const ext = extFind(match[1]);
     const run = findRun(match[1]);
-    if (!run) return noRun(match[1]);
-    const from = run.spec.name;
+    if (!run && !ext) return noRun(match[1]);
+    const from = ext ? ext.name : run.spec.name;
+    const status = ext ? ext.status : run.status;
     const to = String((body && body.name) || "").trim();
-    if (run.status === "running" || run.status === "stopping") return { error: `${from} is training; stop it before renaming it.` };
-    if (run.status === "queued") return { error: `${from} is queued; take it out of the queue before renaming it.` };
+    if (status === "running" || status === "stopping") return { error: `${from} is training; stop it before renaming it.` };
+    if (status === "queued") return { error: `${from} is queued; take it out of the queue before renaming it.` };
     if (!/^[A-Za-z0-9_-]+$/.test(to)) return { error: `"${to}" is not a valid run name: use letters, digits, - and _.` };
     if (to === from) return { error: `${from} is already called that.` };
-    if (runs.some((r) => r !== run && r.spec.name.toLowerCase() === to.toLowerCase())) return { error: `A run called ${to} already exists.` };
+    if (to.toLowerCase() !== from.toLowerCase() && window.MockTraining.taken(to)) return { error: `A run called ${to} already exists.` };
+    if (ext) {
+      ext.rename(to);
+      App.emit("mock:rename", { from, to });
+      return ext.summary();
+    }
     run.spec.name = to;
     run.config.run.name = to;
     const rename = (spec) => spec.replace(new RegExp(`^model:${from}/`), `model:${to}/`);

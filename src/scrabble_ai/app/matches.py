@@ -127,7 +127,9 @@ def play_match_detailed(engine, leaves, scorers: dict, a: str, b: str, seeds: np
             actions = np.zeros(slots, np.int32)
             for spec, mask in ((a, a_to_move), (b, ~a_to_move)):
                 if spec in scorers and mask.any():
-                    choice = choose(buffers, scorers[spec], 0.0, 0.0, 100.0, device, generator, only=deciding[mask])
+                    scorer = scorers[spec]
+                    choice = choose(buffers, scorer, 0.0, getattr(scorer, "win_weight", 0.0), getattr(scorer, "win_scale", 100.0),
+                                    device, generator, only=deciding[mask])
                     actions[choice.slots] = choice.actions
             env.apply(actions)
         if progress is not None and time.time() - last_report > 0.75:

@@ -36,7 +36,8 @@
     { key: "network", label: "Network", dir: -1, get: (m) => m.parameters },
     { key: "games", label: "Games", num: true, dir: -1, get: (m) => m.games, title: "Self-play games the run had played when this network was saved" },
     { key: "gl", label: "vs greedy-leave", num: true, dir: -1, get: (m) => spreadOf(m, "greedy-leave"),
-      title: "Average spread a game against the greedy + leave bot, from the run's evaluation of this network, ± its 95% interval" },
+      title: "Average spread a game against the greedy + leave bot, from the run's evaluation of this network, ± its 95% interval. " +
+        "For a network trained from saved games, its win rate instead: those are judged by wins." },
     { key: "g", label: "vs greedy", num: true, dir: -1, get: (m) => spreadOf(m, "greedy"),
       title: "Average spread a game against the greedy bot, ± its 95% interval" },
     { key: "size", label: "Size", num: true, dir: -1, get: (m) => m.size_bytes },
@@ -192,6 +193,26 @@
       renderTable();
     }
 
+    // Runs that train from saved games are judged by wins: their models show a win rate against
+    // greedy-leave where the others show a spread (the run modes come from GET /api/runs).
+    function gamesRunOf(m) {
+      const run = runs ? runs.find((r) => r.name === m.run) : null;
+      return run && K.isGames(run) ? run : null;
+    }
+    function glValue(m) {
+      const run = gamesRunOf(m);
+      if (!run) return spreadOf(m, "greedy-leave");
+      const w = K.modelWin(m, run);
+      return w ? w.win_rate : null;
+    }
+    function glCell(m) {
+      const run = gamesRunOf(m);
+      if (!run) return K.spread(evalOf(m, "greedy-leave"), "greedy-leave");
+      return h("span", { class: "tm-win-cell", title: "Trained from saved games, so judged by wins: the share of games it won against " +
+        "greedy + leave in its run's match at this step, ± its 95% interval. 50% is level." }, K.winCell(K.modelWin(m, run), "greedy + leave"),
+        h("span", { class: "tm-sub" }, "of games"));
+    }
+
     function renderTable() {
       const list = visibleModels();
       const runCount = new Set(models.map((m) => m.run)).size;
@@ -212,9 +233,16 @@
         return;
       }
       refs.foot.hidden = false;
+      const anyGames = models.some((m) => gamesRunOf(m));
+      refs.foot.replaceChildren(...K.spreadLegend(), anyGames ? h("span", null,
+        "Networks trained from games show their win rate instead: share of games won, ± its 95% interval, marked when the whole interval is above 50%.") : null);
       const column = COLUMNS.find((c) => c.key === lib.sort) || COLUMNS[4];
       const byName = COLUMNS[1].get;
-      const sorted = list.slice().sort((a, b) => K.compareBy(column.get, lib.dir)(a, b) || byName(a).localeCompare(byName(b)));
+      // A spread and a win rate do not compare: by that column, self-play networks come first, then those trained from games.
+      const main = column.key === "gl"
+        ? (a, b) => (gamesRunOf(a) ? 1 : 0) - (gamesRunOf(b) ? 1 : 0) || K.compareBy(glValue, lib.dir)(a, b)
+        : K.compareBy(column.get, lib.dir);
+      const sorted = list.slice().sort((a, b) => main(a, b) || byName(a).localeCompare(byName(b)));
       refs.table.replaceChildren(h("table", { class: "table tm-table tm-models" },
         h("thead", null, h("tr", null, COLUMNS.map((c) => K.sortHeader(c, lib, onSort)),
           h("th", { class: "tm-actions-cell" }, h("span", { class: "tm-sr" }, "Actions")))),
@@ -238,8 +266,11 @@
           note.line),
         h("td", { class: "tm-fade" }, h("span", { class: "tm-net" }, m.network || "–"),
           m.parameters ? h("span", { class: "tm-sub" }, `${fmt.compact(m.parameters)} parameters`) : null),
-        h("td", { class: "num tm-fade", title: m.games !== null && m.games !== undefined ? `${fmt.int(m.games)} games` : null }, fmt.compact(m.games)),
-        h("td", { class: "num tm-fade" }, K.spread(evalOf(m, "greedy-leave"), "greedy-leave")),
+        gamesRunOf(m)
+          ? h("td", { class: "num tm-fade", title: m.games !== null && m.games !== undefined ? `${fmt.int(m.games)} positions trained on, one from each saved game` : null },
+            fmt.compact(m.games), h("span", { class: "tm-sub" }, "positions"))
+          : h("td", { class: "num tm-fade", title: m.games !== null && m.games !== undefined ? `${fmt.int(m.games)} games` : null }, fmt.compact(m.games)),
+        h("td", { class: "num tm-fade" }, glCell(m)),
         h("td", { class: "num tm-fade" }, K.spread(evalOf(m, "greedy"), "greedy")),
         h("td", { class: "num secondary tm-fade" }, fmt.bytes(m.size_bytes)),
         h("td", { class: "num secondary nowrap tm-fade", title: fmt.datetime(m.modified) }, fmt.ago(m.modified)),

@@ -32,7 +32,8 @@ from scrabble_ai.app import insights
 from scrabble_ai.app.procs import (  # noqa: F401  (pid_alive, kill_process and read_json are re-exported)
     kill_process, marker_pid, marker_time, pid_alive, read_json, started_after,
 )
-from scrabble_ai.config import Config, ConfigError, load_config
+from scrabble_ai import games as games_module
+from scrabble_ai.config import OFFLINE_DEFAULTS, Config, ConfigError, load_config
 from scrabble_ai.lexicon import REPO_ROOT
 
 RUNS_DIR = REPO_ROOT / "runs"
@@ -41,7 +42,10 @@ NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")  # used with fullma
 # Settings the app decides itself: where a run lives and what it is called.
 RESERVED_SETTINGS = ("run.name", "run.out_dir")
 # Settings a checkpoint fixes for good (the network's shape, the word list, the value scale).
-LOCKED_ON_RESUME = ("run.lexicon", "run.leaves", "model.", "train.value_scale")
+# For a run that trains from games, also the set and the two settings that decide which games
+# each step trains on and which are held out.
+LOCKED_ON_RESUME = ("run.lexicon", "run.leaves", "model.", "train.value_scale", "offline.games", "offline.batch_size",
+                    "offline.validation_games")
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -102,14 +106,15 @@ class _Metrics:
         self.path = path
         self.offset = 0
         self.records: list[dict] = []
-        self._overview: tuple[int, int, dict] | None = None
+        self._overview: tuple[int, int, bool, dict] | None = None
 
-    def overview(self) -> dict:
-        """How training went (insights.run_overview), worked out again only when the log has changed."""
-        key = (self.offset, len(self.records))
-        if self._overview is None or self._overview[:2] != key:
-            self._overview = (*key, insights.run_overview(self.records))
-        return self._overview[2]
+    def overview(self, games: bool = False) -> dict:
+        """How training went (insights.run_overview, or games_overview for a run that trains from
+        games and is judged by its win rate), worked out again only when the log has changed."""
+        key = (self.offset, len(self.records), games)
+        if self._overview is None or self._overview[:3] != key:
+            self._overview = (*key, insights.games_overview(self.records) if games else insights.run_overview(self.records))
+        return self._overview[3]
 
     def refresh(self) -> list[dict]:
         try:
@@ -144,9 +149,12 @@ class _Metrics:
 
 
 class RunManager:
-    def __init__(self, runs_dir: Path = RUNS_DIR, app_dir: Path = APP_DIR):
+    def __init__(self, runs_dir: Path = RUNS_DIR, app_dir: Path = APP_DIR, games_dir: Path | None = None):
+        """`games_dir` holds the game sets that runs can train from: by default the `games`
+        folder beside the app's own (`data/games` for `data/app`)."""
         self.runs_dir = runs_dir
         self.app_dir = app_dir
+        self.games_dir = games_dir if games_dir is not None else app_dir.parent / "games"
         self.lock = threading.RLock()
         self._metrics: dict[str, _Metrics] = {}
         self._defaults = flatten(Config().to_dict())
@@ -233,6 +241,23 @@ class RunManager:
         except ConfigError:
             return Config().to_dict()
 
+    def mode(self, name: str) -> str:
+        """"games" for a run that trains from a set of saved games, "selfplay" for one that
+        plays itself. It is the run's settings that say which: `offline.games` names the set."""
+        return "games" if flatten(self.config(name)).get("offline.games") else "selfplay"
+
+    def using_games(self, game_set: str) -> list[str]:
+        """Runs that are training from `game_set` right now."""
+        using = []
+        for name in self.names():
+            try:
+                summary = self.summary(name)
+            except Exception:
+                continue
+            if summary.get("game_set") == game_set and summary["status"] in ("running", "stopping", "queued"):
+                using.append(name)
+        return using
+
     def _status(self, run_dir: Path, records: list[dict]) -> tuple[str, str | None]:
         """(status, error)."""
         if (run_dir / "running.json").exists():
@@ -256,18 +281,21 @@ class RunManager:
 
     def summary(self, name: str) -> dict:
         run_dir = self.path(name)
-        with self.lock:
-            records = self.records(name)
-            overview = self._metrics[name].overview()
         config = self.config(name)
         flat = flatten(config)
+        games_mode = bool(flat.get("offline.games"))
+        with self.lock:
+            records = self.records(name)
+            overview = self._metrics[name].overview(games_mode)
         status, error = self._status(run_dir, records)
         last = records[-1] if records else {}
         selfplay = [r for r in records if r.get("kind") == "selfplay"]
         starts = [r for r in records if r.get("kind") == "session" and r.get("event") == "start"]
 
         phase = None
-        if selfplay or any(r.get("kind") == "session" and r.get("event") == "selfplay" for r in records):
+        if games_mode:
+            phase = "training" if starts or status in ("running", "stopping") else None
+        elif selfplay or any(r.get("kind") == "session" and r.get("event") == "selfplay" for r in records):
             phase = "selfplay"
         elif any(r.get("kind") == "warmstart" for r in records):
             phase = "pretraining"
@@ -283,12 +311,26 @@ class RunManager:
                 if latest_eval is None or at != latest_at:
                     latest_eval, latest_at = {"games": record.get("games", 0)}, at
                 latest_eval[record["opponent"]] = {"spread": record["spread"], "ci": record.get("spread_ci"),
-                                                   "win_rate": record.get("win_rate")}
+                                                   "win_rate": record.get("win_rate"), "win_ci": record.get("win_ci")}
 
         hours_limit, games_limit = flat.get("run.hours", 0.0), flat.get("run.max_games", 0)
         progress = None
+        # A run that trains from games: what it is working through, and how far it has got.
+        total_steps = next((r.get("total_steps") for r in reversed(starts) if r.get("total_steps")), None)
+        steps_per_pass = next((r.get("steps_per_pass") for r in reversed(starts) if r.get("steps_per_pass")), None)
+        trained = [r for r in records if r.get("kind") == "train"]
+        games_fields = {
+            "mode": "games" if games_mode else "selfplay",
+            "game_set": Path(str(flat["offline.games"])).name if games_mode else None,
+            "total_steps": total_steps if games_mode else None,
+            "passes": flat.get("offline.passes") if games_mode else None,
+            "pass": round(last.get("step", 0) / steps_per_pass, 3) if games_mode and steps_per_pass else None,
+            "positions_per_second": trained[-1].get("positions_per_second") if games_mode and trained else None,
+        }
         if status == "finished":
             progress = 1.0
+        elif games_mode:
+            progress = min(1.0, last.get("step", 0) / total_steps) if total_steps else None
         elif status in ("running", "stopping") and starts:
             parts = []
             if hours_limit:
@@ -327,6 +369,7 @@ class RunManager:
             "changed": changed,
             "error": error,
             **overview,  # trend, best_eval, health
+            **games_fields,
         }
 
     def list(self) -> list[dict]:
@@ -376,6 +419,10 @@ class RunManager:
             if key in RESERVED_SETTINGS:
                 raise RunError(f"{key} is set by the app and cannot be changed")
         items = [f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in overrides.items()]
+        if base is None and overrides.get("offline.games"):
+            # Training from games changes a few defaults elsewhere (`scrabble-ai train-games` does
+            # the same), before anything the user set.
+            items = [f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in OFFLINE_DEFAULTS.items()] + items
         try:
             if base is None:
                 return load_config(None, items)
@@ -399,9 +446,30 @@ class RunManager:
             raise RunError(str(error)) from None
         del engine_name
 
-    def _train_command(self, name: str, arguments: list[str]) -> list[str]:
-        return [python_executable(), "-u", "-m", "scrabble_ai.cli", "train", "--name", name,
+    def _train_command(self, name: str, arguments: list[str], games: bool | None = None) -> list[str]:
+        """`games`: whether the run trains from saved games (by default, what its settings say)."""
+        if games is None:
+            games = self.mode(name) == "games"
+        return [python_executable(), "-u", "-m", "scrabble_ai.cli", "train-games" if games else "train", "--name", name,
                 "--set", f"run.out_dir={self.runs_dir}", *arguments]
+
+    def _with_game_set(self, overrides: dict) -> dict:
+        """For a run that trains from games: check the set it names can be trained from, and
+        name it by its folder, which is how the trainer is told where it is."""
+        name = overrides.get("offline.games")
+        if not name:
+            return overrides
+        if not isinstance(name, str):
+            raise RunError("offline.games must be the name of a game set")
+        directory = Path(name) if any(sep in name for sep in "/\\") else self.games_dir / name
+        if not games_module.NAME.fullmatch(directory.name):
+            raise RunError(f"there is no game set named {name!r}")
+        meta = games_module.read_meta(directory)
+        if meta is None or meta["games"] < 1:
+            raise RunError(f"there is no game set named {directory.name!r} with games in it")
+        if (directory / "running.json").exists() and self._alive(directory / "running.json"):
+            raise RunError(f"the game set {directory.name} is still being built; wait for it or stop it first")
+        return {**overrides, "offline.games": str(directory)}
 
     def _launch(self, name: str, arguments: list[str], overrides: dict | None = None) -> None:
         run_dir = self.path(name)
@@ -413,7 +481,8 @@ class RunManager:
             stored = overrides if overrides is not None else self._stored_overrides(run_dir)
             (run_dir / "unstarted.json").write_text(json.dumps({"overrides": stored}), encoding="utf-8")
         (run_dir / "queued.json").unlink(missing_ok=True)
-        pid = spawn_detached(self._train_command(name, arguments), run_dir / "console.log")
+        games = bool((overrides or {}).get("offline.games")) if overrides is not None else None
+        pid = spawn_detached(self._train_command(name, arguments, games), run_dir / "console.log")
         # The trainer rewrites this itself once it is up; until then it marks the run as started.
         (run_dir / "running.json").write_text(json.dumps({"pid": pid, "started": time.time()}), encoding="utf-8")
 
@@ -430,6 +499,8 @@ class RunManager:
         with self.lock:
             for spec in specs:
                 try:
+                    if isinstance(spec.get("overrides"), dict):
+                        spec["overrides"] = self._with_game_set(spec["overrides"])
                     self._check_new(spec["name"], spec.get("overrides") or {})
                 except RunError as error:
                     # Say which run, so the form can show the message on the right one.
@@ -446,7 +517,9 @@ class RunManager:
             while queue_file.exists():  # later queues in the same second sort after the first
                 extra += 1
                 queue_file = queue_dir / f"{stem}_{extra:03d}.json"
-            entries = [{"name": spec["name"], "command": self._train_command(spec["name"], override_arguments(spec.get("overrides") or {})),
+            entries = [{"name": spec["name"],
+                        "command": self._train_command(spec["name"], override_arguments(spec.get("overrides") or {}),
+                                                       bool((spec.get("overrides") or {}).get("offline.games"))),
                         "log": str(self.path(spec["name"]) / "console.log")} for spec in specs]
             queue_file.write_text(json.dumps({"runs": entries, "runs_dir": str(self.runs_dir)}), encoding="utf-8")
             # Markers first, then the runner: it skips any run whose marker is missing.

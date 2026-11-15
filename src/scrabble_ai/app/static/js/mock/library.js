@@ -1,7 +1,10 @@
 /* Mock API for the Training and Models pages. Loaded only with ?mock=1.
  *
  * Answers GET /api/config/schema, GET /api/models, POST /api/models/<id>/meta, GET /api/leaves
- * and POST /api/runs. It also registers fallbacks for GET /api/status, GET /api/runs, the
+ * and POST /api/runs. The schema has the parts for training from saved games (`modes` on every
+ * field, the `offline` section, `games_presets`, `games_defaults`, the network-kind settings),
+ * in the server's words, and is shared with js/mock/offline.js as window.MockSchema; the models
+ * of that file's runs join GET /api/models. It also registers fallbacks for GET /api/status, GET /api/runs, the
  * per-run metrics and stop / resume / delete, but only when js/mock/training.js (loaded first)
  * has not already registered them.
  *
@@ -306,11 +309,145 @@
     }
   }
 
+  // ---- The parts of the schema for training from saved games (docs/APP_API.md) -----------------
+  // The settings added with it, in the server's words (src/scrabble_ai/app/schema.py), the
+  // sixth section `offline`, `modes` on every field, `games_presets` and `games_defaults`.
+
+  const OLD_SERVER = search.has("old");  // an older server has none of this
+  const sectionOf = (name) => SCHEMA.sections.find((s) => s.name === name);
+  const withEffects = (f, lower, higher, typical) => {
+    if (!OLD_SERVER) f.effects = { lower, higher, typical };
+    return f;
+  };
+  if (!OLD_SERVER) sectionOf("model").fields.push(
+    withEffects(field("model.extra_scalars", "Extra facts", "bool", true, Object.assign({
+      help: "Thirteen numbers the network would otherwise have to work out: the points the move scored, how long since the opponent last played all seven tiles, how much of the unseen pool is blanks, S, J, Q, X and Z, and the vowel balance of the pool and of the kept tiles." }, LOCKED)),
+    "Off: only to measure what they are worth.", "On: the default. They cost nothing measurable.", "on"),
+    withEffects(field("model.last_move_plane", "Opponent's last move", "bool", true, Object.assign({
+      help: "Marks the squares where the opponent's previous move put its tiles." }, LOCKED)),
+    "Off: the network knows how many tiles they placed and for how many points, but not where.", "On: the default. It costs nothing measurable.", "on"),
+    withEffects(field("model.openness", "Board openness", "bool", true, Object.assign({
+      help: "What the next player could do with the board a move leaves: which empty squares a placement can reach and with how few tiles, where seven tiles fit, and which triple- and double-word squares are in reach." }, LOCKED)),
+    "Off: the network must work reach out from the tiles and the cross-check planes, a few squares at a time.",
+    "On: the default. The engine works it out for every candidate: 7 to 11 microseconds a board on one core, against 3 to 8 for the cross-check masks.", "on"),
+    withEffects(field("model.hooks", "Hook squares", "bool", true, Object.assign({
+      help: "Marks the squares where one letter extends a word already on the board, in front of it or after it, with how many letters fit there and where an S does." }, LOCKED)),
+    "Off: the same facts are in the cross-check planes, less directly.", "On: the default. Worked out on the GPU from the cross-check masks.", "on"),
+    withEffects(field("model.belief_samples", "Opponent-rack inference", "int", 4, INT(0, 64, Object.assign({ unit: "racks",
+      help: "After each placement the engine samples this many racks the mover might have had and weighs each by how good the move played would have been with it. The expected tiles on the opponent's rack are then an input. 0 leaves the input out." }, LOCKED))),
+    "Cheaper and a rougher estimate. 0: no inference, and the network has no such input.",
+    "A steadier estimate. Each sample is one full move generation per move played, so self-play slows down.", "0, or 4 to 12"),
+    withEffects(field("model.kind", "Kind of network", "choice", "cnn", Object.assign({ options: ["cnn", "cnn-global", "transformer"],
+      help: "The body of the network. cnn: residual blocks of 3 x 3 convolutions. cnn-global: the same with board-wide pooling in every third block, so each square is told about the whole board (from KataGo). transformer: one token per square and layers of attention, in which every square can look at every other; Residual blocks is then the number of layers and Channels the width of a token." }, LOCKED)),
+    "cnn and cnn-global: fast. In the one published comparison on Scrabble, convolutional networks of 64 to 128 channels all stopped at about 52.5% of games against the static evaluator.",
+    "transformer: the kind behind the strongest published Scrabble value networks (57.65%, at 8 layers of 192), which also had the helper outputs. Several times slower; not timed here yet.",
+    "cnn first; then transformer at 8 blocks x 192 channels"),
+    withEffects(field("model.head", "Head", "choice", "flat", Object.assign({ options: ["flat", "pooled"],
+      help: "How the outputs read the board. flat: through a layer with a weight for every square, which is where the first networks learned particular boards by heart. pooled: through each channel's average and maximum over the board only." }, LOCKED)),
+    "flat: what every network before 15 November 2026 has.",
+    "pooled: far fewer weights (about 610,000 in a 6x64 network against 1.07 million) and nothing that can memorise a board square by square.",
+    "pooled for training from games"),
+    withEffects(field("model.win_head", "Win output", "choice", "binary", Object.assign({ options: ["binary", "wdl"],
+      help: "binary: one number, the chance of winning. wdl: three, for win, draw and loss." }, LOCKED)),
+    "binary: what every earlier network has.", "wdl: the output training from games is built around.", "wdl for training from games"),
+    withEffects(field("model.aux_heads", "Helper outputs", "bool", false, Object.assign({
+      help: "Extra outputs used only as training signal: the opponent's next score, whether they place all seven tiles, and where the next two moves land. They are never used to choose a move." }, LOCKED)),
+    "Off: the network learns from the result of the game alone.",
+    "On: in the published Scrabble results these were the largest single gain, about four points of win rate, measured on a transformer. Only training from games teaches them.",
+    "on for training from games"));
+  if (!OLD_SERVER) {
+    const train = sectionOf("train").fields;
+    const at = train.findIndex((f) => f.key === "train.td_lambda");
+    train.splice(at, 0, withEffects(field("train.target", "Learning rule", "choice", "td", { options: ["td", "q"],
+      help: "What each position learns from. td: what followed in its own game, as TD lambda sets out. q: deep Q-learning: the best move the network believes the opponent has next, with the self-play copy of the network as the target network." }),
+    "td: learns from moves that were played. Steadier.",
+    "q: learns from the move rated best, whether or not it was played. It takes a maximum over many uncertain ratings, which overstates them: watch the edge over leave values for it.",
+    "td, or q to compare"));
+  }
+  const OFF = (key, label, type, def, extra, lower, higher, typical) => withEffects(field(key, label, type, def, extra), lower, higher, typical);
+  if (!OLD_SERVER) SCHEMA.sections.push({
+    name: "offline", title: "Training from games",
+    fields: [
+      OFF("offline.games", "Game set", "str", "", { advanced: false, locked_on_resume: true, help: "The saved games to learn from: a set made on this page." },
+        "A smaller set: in the published results 5.4 million games were too few (50.98% against the static evaluator).",
+        "A larger set: about 20 million games reached 53.1%, and doubling that added nothing without the helper outputs.", "a set of 20 million games or more"),
+      OFF("offline.passes", "Passes", "float", 6.0, FLOAT(0.01, 100, 1, { advanced: false,
+        help: "Times through the game set. Each pass takes one position from every game, a different one each time." }),
+      "Sooner done; fewer positions seen.", "More positions from the same games. The published recipe used 6.", "4 to 8"),
+      OFF("offline.batch_size", "Batch size", "int", 2048, INT(16, 16384, { step: 256, unit: "positions", locked_on_resume: true, help: "Positions per training step." }),
+        "More, noisier updates per pass.", "Fewer, smoother updates; more GPU memory.", "1,024 to 4,096"),
+      OFF("offline.learning_rate", "Learning rate", "float", 0.0003, FLOAT(0.000001, 1, 0.0001, {
+        help: "Step size at its peak. It ramps up over the warm-up, then falls along a cosine to a twentieth of this by the last step." }),
+      "Slower, steadier.", "Faster; too high and the loss on held-out games stops falling.", "0.0001 to 0.001"),
+      OFF("offline.warmup_steps", "Warm-up steps", "int", 500, INT(0, 100000, { step: 100, unit: "steps", help: "Steps over which the learning rate ramps up from zero." }),
+        "Full speed sooner.", "A gentler start.", "200 to 2,000"),
+      OFF("offline.weight_decay", "Weight decay", "float", 0.0001, FLOAT(0, 1, 0.0001, { help: "Pulls the weights towards zero at every step." }),
+        "Less restraint.", "More restraint; too much and the network cannot fit.", "0.00001 to 0.001"),
+      OFF("offline.grad_clip", "Gradient clip", "float", 1.0, FLOAT(0, 100, 0.5, { help: "Maximum gradient norm. 0 turns clipping off." }),
+        "Caps large updates harder.", "Lets large updates through.", "0.5 to 5"),
+      OFF("offline.validation_games", "Held-out games", "int", 20000, INT(0, 10000000, { step: 5000, unit: "games", locked_on_resume: true,
+        help: "Games kept out of training, to measure the loss on games never learned from. At most a tenth of the set." }),
+      "Almost every game is trained on; the measurement is rougher.", "A steadier measurement; fewer games to train on.", "10,000 to 50,000"),
+      OFF("offline.validate_steps", "Check every", "int", 500, INT(1, 1000000, { step: 100, unit: "steps",
+        help: "Training steps between measurements on the held-out games." }), "A finer curve; a little time each.", "A coarser curve.", "200 to 2,000"),
+      OFF("offline.aux_share", "Helper pull", "float", 0.15, FLOAT(0, 1, 0.05, {
+        help: "Each helper output's pull on the network, as a share of the main output's. The weights are re-measured as training goes. 0 uses the two fixed weights below instead." }),
+      "Helpers matter less. In the published results fixed weights let one helper out-pull the main output and cost 1.4 points of win rate.",
+      "Helpers matter more, at the main output's expense.", "0.1 to 0.25"),
+      OFF("offline.spread_weight", "Points weight", "float", 0.25, FLOAT(0, 10, 0.05, { help: "Fixed weight of the points output, used only when Helper pull is 0." }),
+        "Points matter less.", "Points matter more.", "0.1 to 0.5"),
+      OFF("offline.aux_weight", "Helper weight", "float", 0.1, FLOAT(0, 10, 0.05, { help: "Fixed weight of each other helper output, used only when Helper pull is 0." }),
+        "Helpers matter less.", "Helpers matter more.", "0.05 to 0.3"),
+      OFF("offline.eval_minutes", "Play the static bot every", "float", 30.0, FLOAT(0.5, 600, 5, { unit: "minutes",
+        help: "How often the network plays the static evaluator. The best network is the one with the highest win rate in these matches." }),
+      "More readings; each takes the GPU from training.", "Fewer readings.", "20 to 60"),
+      OFF("offline.eval_pairs", "Pairs per match", "int", 2000, INT(2, 1000000, { step: 500, unit: "pairs", help: "Seat-swapped pairs in each of those matches." }),
+        "Quicker and vaguer.", "Slower and sharper: 2,000 pairs give about +/- 1.3 points of win rate, 20,000 about +/- 0.4.", "2,000 to 5,000"),
+      OFF("offline.final_pairs", "Pairs in the final match", "int", 10000, INT(2, 1000000, { step: 1000, unit: "pairs",
+        help: "Pairs in the match played when every pass is done." }), "A rougher final figure.", "A sharper one: 10,000 pairs give about +/- 0.6 points of win rate.", "10,000 to 50,000"),
+      OFF("offline.checkpoint_minutes", "Checkpoint every", "float", 10.0, FLOAT(0.5, 600, 1, { unit: "minutes", help: "How often the training state is saved." }),
+        "Less lost if the run dies.", "Fewer saves.", "10 to 30"),
+      OFF("offline.keep_checkpoints", "Checkpoints kept", "int", 3, INT(1, 1000, { help: "Step files kept on disk. The best network is always kept." }),
+        "Less disk used.", "More history.", "2 to 5"),
+      OFF("offline.augment_transpose", "Transpose augmentation", "bool", true, { help: "Randomly swap rows and columns: the one exact symmetry of the board." },
+        "Off: half the variety.", "On: the default.", "on"),
+      OFF("offline.amp", "Mixed precision", "bool", true, { help: "bf16 autocast." }, "Off: full precision; slower and more memory.", "On: the default.", "on"),
+    ],
+  });
+  // Which form shows each setting, by the server's rule (schema.py `_modes`).
+  const GAMES_TOO = new Set(["selfplay.max_candidates", "selfplay.max_exchanges", "selfplay.win_weight", "selfplay.win_scale",
+    "train.value_scale", "train.huber_delta"]);
+  if (!OLD_SERVER) {
+    for (const section of SCHEMA.sections) {
+      for (const f of section.fields) {
+        if (section.name === "offline") f.modes = ["games"];
+        else if (f.key === "run.max_games") f.modes = ["selfplay"];
+        else if (section.name === "run" || section.name === "model" || GAMES_TOO.has(f.key)) f.modes = ["selfplay", "games"];
+        else f.modes = ["selfplay"];
+      }
+    }
+    SCHEMA.presets.splice(SCHEMA.presets.length - 1, 0, { name: "Deep Q-learning 6x64",
+      description: "The default network, learning by Q-learning: each position learns from the move the network rates best for the opponent, not from the move that was played.",
+      overrides: { "train.target": "q" } });
+    SCHEMA.games_presets = [
+      { name: "CNN 6x64", description: "The fastest to train and to play. Convolutional networks stopped near 52.5% against the static evaluator in the published results, without the helper outputs this one has.", overrides: {} },
+      { name: "CNN with board-wide pooling 6x64", description: "The same with KataGo's global pooling, so every square is told about the whole board. Hardly slower. Not tried on Scrabble by anyone yet.",
+        overrides: { "model.kind": "cnn-global" } },
+      { name: "Transformer 8x192", description: "The shape of the strongest published Scrabble value networks (57.65% against the static evaluator). Several times slower to train and to play; not timed here yet.",
+        overrides: { "model.kind": "transformer", "model.blocks": 8, "model.channels": 192 } },
+      { name: "Quick test", description: "A tenth of a pass with short matches, to check everything works.",
+        overrides: { "offline.passes": 0.1, "offline.eval_pairs": 200, "offline.final_pairs": 500, "offline.validate_steps": 100 } },
+    ];
+    SCHEMA.games_defaults = { "model.head": "pooled", "model.win_head": "wdl", "model.aux_heads": true, "selfplay.win_weight": 0.9,
+      "selfplay.max_candidates": 32 };
+  }
+
   const FIELDS = {};
   for (const section of SCHEMA.sections) for (const f of section.fields) FIELDS[f.key] = f;
   const PARAMS = Object.fromEntries(SCHEMA.speed.map((row) => [row.network, row.parameters]));
 
   M.on("GET", /^\/api\/config\/schema$/, () => SCHEMA);
+  window.MockSchema = SCHEMA;  // js/mock/offline.js builds the settings of its runs from it
 
   // ---- Runs (a fallback, used only if js/mock/training.js does not provide runs) ---------
 
@@ -585,6 +722,13 @@
     model("wide2", "step_000024100.pt", "10x128", 24100, 460800, 3, [-71.3, 8.4], [-30.2, 8.6]),
   ].map((m) => (m.incompatible_reason ? Object.assign(m, { compatible: false }) : m));
 
+  // A deleted run (js/mock/training.js) takes its models with it. The models of the runs that
+  // js/mock/offline.js simulates (runs that train from games) come from window.MockOffline.
+  const offlineModels = () => (window.MockOffline ? window.MockOffline.models() : []);
+  App.on("mock:delete-run", ({ name }) => {
+    for (let i = MODELS.length - 1; i >= 0; i--) if (MODELS[i].run === name) MODELS.splice(i, 1);
+  });
+
   // A run renamed in js/mock/training.js renames its models (they are named after their run).
   App.on("mock:rename", ({ from, to }) => {
     for (const m of MODELS) {
@@ -615,12 +759,13 @@
 
   M.on("GET", /^\/api\/models$/, (match, body, query) => {
     if (query.demo === "empty") return { bots: BOTS, models: [] };
-    return { bots: BOTS, models: query.demo === "many" ? manyModels() : MODELS };
+    return { bots: BOTS, models: (query.demo === "many" ? manyModels() : MODELS).concat(offlineModels()) };
   });
 
   M.on("POST", /^\/api\/models\/(.+)\/meta$/, (match, body) => {
     const id = match[1].split("/").map(decodeURIComponent).join("/");
     const found = MODELS.find((m) => m.id === id);
+    if (!found && window.MockOffline && window.MockOffline.meta(id, body)) return window.MockOffline.meta(id, body);
     if (!found) return fail("no model " + id);
     if (body && "starred" in body) found.starred = !!body.starred;
     if (body && "note" in body) found.note = String(body.note || "");

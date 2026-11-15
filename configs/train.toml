@@ -56,6 +56,15 @@ belief_samples = 4      # after each placement, sample this many racks the mover
                         # and weigh each by how good the move played would have been with it;
                         # the expected tiles on the opponent's rack are an input. Each sample
                         # costs one full move generation per move played. 0 = no such input.
+kind = "cnn"            # the body of the network. "cnn": residual blocks of 3 x 3 convolutions.
+                        # "cnn-global": the same with board-wide pooling in every third block.
+                        # "transformer": one token per square and `blocks` layers of attention of
+                        # width `channels` (several times slower).
+head = "flat"           # "flat": the outputs read a few channels of every square. "pooled": only each
+                        # channel's average and maximum over the board, which cannot memorise boards.
+win_head = "binary"     # "binary": one win logit. "wdl": win, draw or loss.
+aux_heads = false       # helper outputs for training from games: the opponent's next score and bingo,
+                        # and where the next two moves land
 
 [selfplay]
 games = 256             # games played in lockstep (speed is flat from 256 to 512)
@@ -89,6 +98,12 @@ grad_clip = 1.0         # maximum gradient norm; 0 = off
 value_scale = 50.0      # points per unit of the value output
 huber_delta = 2.0       # the value loss is quadratic within this many units (100 points) and linear beyond
 win_loss_weight = 0.5   # weight of the win-probability loss relative to the value loss
+target = "td"           # the learning rule. "td": each position learns from what followed in its game,
+                        # as td_lambda below sets out. "q": deep Q-learning: each position learns from
+                        # the best move the network believes the opponent has next (the self-play copy
+                        # of the network, synced every actor_sync_steps, is the target network), and
+                        # td_lambda is not used. Q-learning takes a maximum over noisy estimates, which
+                        # overstates them; that is the risk to watch with it.
 td_lambda = 0.7         # 1 = Monte Carlo targets: the spread actually gained from each position on,
                         # whose noise (about 75 points) is what the networks memorised. Below 1,
                         # targets lean on the estimate of the next position instead: far less noise,
@@ -109,3 +124,30 @@ eval_minutes = 20.0     # how often to evaluate against the baselines and gate a
 eval_pairs = 250        # seat-swapped pairs per baseline in those evaluations
 gate_pairs = 500        # pairs when testing a checkpoint against the current best network
 keep_checkpoints = 5    # step_*.pt files kept (best.pt is always kept)
+
+# Training from saved games: `uv run scrabble-ai train-games --games <set> --name <run>`. The
+# self-play trainer does not read this section. `train-games` also changes five settings above
+# unless told otherwise: model.head = "pooled", model.win_head = "wdl", model.aux_heads = true,
+# selfplay.win_weight = 0.9 (pick moves by win chance, points breaking ties) and
+# selfplay.max_candidates = 32.
+[offline]
+games = ""              # the game set to learn from: a name under data/games (`scrabble-ai games`)
+passes = 6.0            # times through the set; each pass takes one fresh position from every game
+batch_size = 2048
+learning_rate = 3e-4    # at its peak; it ramps up, then falls along a cosine to a twentieth of this
+warmup_steps = 500
+weight_decay = 1e-4
+grad_clip = 1.0
+validation_games = 20000  # games held out of training (at most a tenth of the set)
+validate_steps = 500    # training steps between measurements on them
+aux_share = 0.15        # each helper output's pull on the network as a share of the main output's;
+                        # 0 = use the two fixed weights below
+spread_weight = 0.25    # fixed weight of the points output
+aux_weight = 0.1        # fixed weight of each other helper output
+eval_minutes = 30.0     # how often the network plays the static evaluator
+eval_pairs = 2000       # seat-swapped pairs in those matches (about +/- 1.3 points of win rate)
+final_pairs = 10000     # pairs in the match when every pass is done (about +/- 0.6)
+checkpoint_minutes = 10.0
+keep_checkpoints = 3
+augment_transpose = true
+amp = true

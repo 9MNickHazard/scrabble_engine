@@ -26,8 +26,32 @@
   };
   const PHASE = { warmstart: "warm start", pretraining: "pretraining", selfplay: "self-play" };
   const isLive = (run) => run.status === "running" || run.status === "stopping";
+  /** A run that trains from saved games: judged by its win rate against the static evaluator. */
+  const isGames = (run) => !!run && run.mode === "games";
   /** "8 h" rather than "8 h 00 m" for whole hours. */
   const hoursText = (hours) => fmt.duration(hours).replace(/ 00 m$/, "");
+
+  /** A win rate and its interval as a figure: "53.4%" and, smaller, "± 1.3". */
+  function winNode(rate, ci, cls) {
+    if (typeof rate !== "number") return h("span", { class: cls }, "–");
+    return h("span", { class: cls }, fmt.pct(rate), typeof ci === "number" ? h("span", { class: "stat-ci" }, " ± " + (100 * ci).toFixed(1)) : null);
+  }
+
+  /** In a few words, what a win rate's interval shows. */
+  function winVerdict(rate, ci) {
+    if (typeof rate !== "number" || typeof ci !== "number") return "";
+    if (rate - ci > 0.5) return "interval above 50%";
+    if (rate + ci < 0.5) return "interval below 50%";
+    return "interval includes 50%";
+  }
+
+  /** The matches of a games run from its `trend`: [{step, games, win_rate, win_ci}], oldest first. */
+  function matchesOf(run) {
+    const t = run.trend || {};
+    const rates = Array.isArray(t.win_rate) ? t.win_rate : [];
+    return rates.map((rate, i) => ({ step: Array.isArray(t.step) ? t.step[i] : null, games: Array.isArray(t.games) ? t.games[i] : null,
+      win_rate: rate, win_ci: Array.isArray(t.win_ci) ? t.win_ci[i] : null })).filter((m) => typeof m.win_rate === "number");
+  }
 
   App.registerView("overview", { title: "Overview", nav: true, order: 10, icon: ICON_OVERVIEW, mount });
 
@@ -63,10 +87,11 @@
     state.models = models.status === "fulfilled" ? models.value : null;
     state.matches = matches.status === "fulfilled" ? matches.value.matches || [] : null;
     const active = state.runs.filter(isLive);
-    await Promise.all(active.map((run) => loadEvals(state, run.name)));
+    // A run trained from games carries its matches in `trend`; only self-play runs need their metrics.
+    await Promise.all(active.filter((run) => !isGames(run)).map((run) => loadEvals(state, run.name)));
     const latest = active.length ? null : latestRun(state.runs);
     if (latest) {
-      await loadEvals(state, latest.name);
+      if (!isGames(latest)) await loadEvals(state, latest.name);
       // An older server sends no verdict: the report's headline says how the run went instead.
       const key = latest.name + "@" + latest.updated;
       if (latest.health === undefined && state.headlines.key !== key) {
@@ -129,17 +154,41 @@
     return h("span", { class: "badge badge-" + tone }, extra ? `${label} · ${extra}` : label);
   }
 
+  /** The names of the runs that train from games, so their models are judged by wins. */
+  function gamesRunNames(state) {
+    return new Set((state.runs || []).filter(isGames).map((r) => r.name));
+  }
+
+  /** Each self-play run's strongest model by spread against greedy + leave, best first. */
   function strongest(state) {
     if (!state.models) return [];
+    const games = gamesRunNames(state);
     const byRun = new Map();
     for (const m of state.models.models || []) {
       const e = m.eval && m.eval["greedy-leave"];
-      if (!m.compatible || !e || typeof e.spread !== "number") continue;
+      if (!m.compatible || !e || typeof e.spread !== "number" || games.has(m.run)) continue;
       const key = m.run || m.id;
       const current = byRun.get(key);
       if (!current || e.spread > current.eval["greedy-leave"].spread) byRun.set(key, m);
     }
     return Array.from(byRun.values()).sort((a, b) => b.eval["greedy-leave"].spread - a.eval["greedy-leave"].spread).slice(0, 5);
+  }
+
+  /** Each games run's strongest model by win rate against greedy + leave, with its interval
+   *  (from the run's trend), best first: [{model, run, win_rate, win_ci}]. */
+  function strongestByWins(state) {
+    if (!state.models || !window.LabKit) return [];
+    const runs = new Map((state.runs || []).filter(isGames).map((r) => [r.name, r]));
+    const byRun = new Map();
+    for (const m of state.models.models || []) {
+      const run = runs.get(m.run);
+      if (!run || !m.compatible) continue;
+      const w = window.LabKit.modelWin(m, run);
+      if (!w) continue;
+      const current = byRun.get(m.run);
+      if (!current || w.win_rate > current.win_rate) byRun.set(m.run, Object.assign({ model: m, run }, w));
+    }
+    return Array.from(byRun.values()).sort((a, b) => b.win_rate - a.win_rate).slice(0, 5);
   }
 
   // ---- Render ---------------------------------------------------------------------------
@@ -149,7 +198,9 @@
     const active = runs.filter(isLive);
     const queued = runs.filter((r) => r.status === "queued");
     const top = strongest(state);
+    const topWins = strongestByWins(state);
     const best = top[0];
+    const bestWins = topWins[0];
 
     let lede;
     if (!runs.length) lede = "Train a network, watch it learn, then play against it.";
@@ -162,6 +213,16 @@
         if (e.spread - ci > 0) lede += ` The strongest network so far is ${best.name}, ${fmt.spread(e.spread, e.ci)} points a game against greedy + leave.`;
         else if (e.spread + ci < 0) lede += ` No network has beaten greedy + leave yet: the closest, ${best.name}, is at ${fmt.spread(e.spread, e.ci)} points a game.`;
         else lede += ` No network has been shown to beat greedy + leave yet: the strongest, ${best.name}, is level with it at ${fmt.spread(e.spread, e.ci)}.`;
+      }
+      if (bestWins) {
+        // Judged by wins: a win only when the whole interval is above one half.
+        const w = window.LabKit.winText(bestWins.win_rate, bestWins.win_ci);
+        const name = bestWins.model.name;
+        if (typeof bestWins.win_ci === "number" && bestWins.win_rate - bestWins.win_ci > 0.5) {
+          lede += ` Of the networks trained from games, ${name} wins the most: ${w} of games against greedy + leave.`;
+        } else {
+          lede += ` No network trained from games has been shown to win more than half its games against greedy + leave yet: the best, ${name}, wins ${w}.`;
+        }
       }
     }
     section(state, "head", els.head, [lede, !runs.length], (el) => el.replaceChildren(h("div", { class: "page-head" },
@@ -189,7 +250,8 @@
 
     renderActive(state, els, active, queued, runs);
     renderGpu(els);
-    section(state, "strongest", els.strongest, top.map((m) => [m.id, m.eval, m.games]), (el) => renderStrongest(el, top));
+    section(state, "strongest", els.strongest, [top.map((m) => [m.id, m.eval, m.games]), topWins.map((w) => [w.model.id, w.win_rate, w.win_ci])],
+      (el) => renderStrongest(el, top, topWins));
     const recent = runs.filter((r) => !isLive(r) && r.status !== "queued")
       .sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 5);
     section(state, "runs", els.runs, recent.map((r) => [r.name, r.status, r.latest_eval, r.health, Math.floor(Date.now() / 60000)]),
@@ -237,8 +299,58 @@
     els.active.classList.toggle("ov-active-multi", active.length > 1);
   }
 
+  /** The latest run when it trained from games: judged by its win rate against greedy + leave. */
+  function latestCardGames(state, run) {
+    const K = kit();
+    const href = `#/run/${encodeURIComponent(run.name)}`;
+    const matches = matchesOf(run);
+    const le = run.latest_eval && run.latest_eval["greedy-leave"];
+    const best = run.best_eval || null;
+    const note = run.health ? run.health.note : null;
+    const when = { finished: "finished", stopped: "stopped", failed: "failed" }[run.status] || "updated";
+    const slot = h("div", { class: "ov-latest-chart" });
+    const pass = typeof run.pass === "number" ? `pass ${fmt.fixed(run.pass, 1)}${typeof run.passes === "number" ? " of " + Number(run.passes.toPrecision(4)) : ""}` : null;
+    const card = h("section", { class: "card ov-latest", "aria-label": "Latest run" },
+      h("div", { class: "ov-latest-head" },
+        h("div", { class: "ov-latest-titles" },
+          h("div", { class: "ov-latest-eyebrow" }, `Latest run · trained from games · ${when} ${fmt.ago(run.updated)} · nothing is training now`),
+          h("div", { class: "ov-run-head" },
+            h("h2", null, h("a", { class: "ov-latest-name", href }, run.name)),
+            statusBadge(run.status), K ? K.healthChip(run.health, null, true) : null,
+            h("span", { class: "muted" }, K ? K.networkLabel(run) : run.network))),
+        h("div", { class: "page-actions" },
+          h("a", { class: "button button-primary", href }, K ? K.icon("chart", 15) : null, "Open all charts"),
+          h("a", { class: "button", href: "#/games" }, "Train from games"))),
+      note ? h("p", { class: "ov-latest-note" + (run.health && (run.health.state === "worse" || run.health.state === "behind") ? " is-bad" : "") },
+        fmt.prose(note)) : run.health === null ? h("p", { class: "ov-latest-note" }, "It never played a match against greedy + leave, so there is no verdict.") : null,
+      h("div", { class: "ov-latest-body" },
+        h("dl", { class: "ov-latest-figures" },
+          figure("Latest match", winNode(le ? le.win_rate : null, le ? le.win_ci : null, "ov-latest-value"),
+            le ? `of games · ${winVerdict(le.win_rate, le.win_ci) || "no interval"}` : "no match"),
+          figure("Best match", winNode(best ? best.win_rate : null, best ? best.win_ci : null, "ov-latest-value"),
+            best ? `at step ${fmt.int(best.step)}` : "none yet"),
+          figure("Positions trained", h("span", { class: "ov-latest-value" }, fmt.compact(run.positions)),
+            [`in ${fmt.duration(run.hours)}`, pass].filter(Boolean).join(" · ")),
+          figure("Game set", h("span", { class: "ov-latest-value" }, run.game_set || "–"),
+            run.parameters ? `${fmt.compact(run.parameters)} parameters` : null)),
+        slot));
+    const chart = Charts.line(slot, {
+      title: "Win rate against greedy + leave, at each match",
+      series: [{ name: "Win rate", points: matches.map((m) => [m.step, m.win_rate]),
+        band: matches.filter((m) => typeof m.win_ci === "number").map((m) => [m.step, m.win_rate - m.win_ci, m.win_rate + m.win_ci]),
+        color: "var(--series-1)" }],
+      x: { label: "training steps", format: (v) => fmt.int(v), tooltipFormat: (v) => "Step " + fmt.int(v), tickFormat: "auto" },
+      y: { label: "games won · 95% interval shaded", format: (v) => fmt.pct(v, 1), tickFormat: (v) => trimPct(100 * v),
+        ciFormat: (v) => (100 * Math.abs(v)).toFixed(1) },
+      referenceY: [{ y: 0.5, label: "50%" }], height: 172, legend: false,
+      empty: run.status === "failed" ? "It failed before its first match." : "No match was recorded.",
+    });
+    return { card, chart };
+  }
+
   /** The latest run, when nothing is training: how it went, its strength chart, a few figures. */
   function latestCard(state, run) {
+    if (isGames(run)) return latestCardGames(state, run);
     const K = kit();
     const href = `#/run/${encodeURIComponent(run.name)}`;
     const evals = (state.metrics[run.name] || { gl: [] }).gl;
@@ -287,7 +399,55 @@
     return { card, chart };
   }
 
+  /** A run training from games right now: how far through its passes, and its latest win rate. */
+  function activeCardGames(state, run) {
+    const K = kit();
+    const href = `#/run/${encodeURIComponent(run.name)}`;
+    const le = run.latest_eval && run.latest_eval["greedy-leave"];
+    const matches = matchesOf(run);
+    let progress = null;
+    if (run.progress !== null && run.progress !== undefined && typeof run.pass === "number") {
+      const passes = typeof run.passes === "number" ? Number(run.passes.toPrecision(4)) : null;
+      progress = { value: run.progress, left: `pass ${fmt.fixed(run.pass, 1)}${passes !== null ? " of " + passes : ""}`,
+        right: run.total_steps ? `step ${fmt.int(run.step)} of ${fmt.int(run.total_steps)}` : `${Math.round(run.progress * 100)}%` };
+    }
+    const spark = h("div", { class: "ov-spark" });
+    const card = h("a", { class: "card ov-run", href, "aria-label": `${run.name}, open the run page` },
+      h("div", { class: "ov-run-main" },
+        h("div", { class: "ov-run-head" },
+          h("h2", null, run.name),
+          statusBadge(run.status),
+          K ? K.healthChip(run.health, null, true) : null,
+          h("span", { class: "muted" }, K ? K.networkLabel(run) : run.network)),
+        progress ? h("div", { class: "ov-progress" },
+          h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100",
+            "aria-valuenow": String(Math.round(progress.value * 100)) }, h("span", { style: { width: `${(progress.value * 100).toFixed(1)}%` } })),
+          h("div", { class: "ov-progress-text" }, h("span", null, progress.left), h("span", { class: "muted" }, progress.right)))
+          : h("div", { class: "ov-progress-text muted" }, "Starting: reading its game set."),
+        h("dl", { class: "ov-figures" },
+          figure("Positions", fmt.compact(run.positions)),
+          figure("Positions per second", typeof run.positions_per_second === "number" ? fmt.int(run.positions_per_second) : "–"),
+          figure("Game set", run.game_set || "–"),
+          figure("Time trained", fmt.duration(run.hours)))),
+      h("div", { class: "ov-run-eval" },
+        h("div", { class: "stat-label" }, "Against greedy + leave"),
+        winNode(le ? le.win_rate : null, le ? le.win_ci : null, "ov-eval-value"),
+        h("div", { class: "stat-hint" }, le
+          ? `of games · ${winVerdict(le.win_rate, le.win_ci) || "no interval"} · ${matches.length} match${matches.length === 1 ? "" : "es"}`
+          : "the first match against greedy + leave is to come"),
+        spark),
+      h("span", { class: "ov-run-go", html: ICON_ARROW, "aria-hidden": "true" }));
+    Charts.sparkline(spark, {
+      points: matches.map((m) => [m.step, m.win_rate]),
+      band: matches.filter((m) => typeof m.win_ci === "number").map((m) => [m.step, m.win_rate - m.win_ci, m.win_rate + m.win_ci]),
+      referenceY: 0.5, width: 260, height: 56, color: "var(--series-1)", format: (v) => fmt.pct(v) + " of games",
+      xFormat: (v) => "Step " + fmt.int(v), label: "Win rate against greedy + leave over the run",
+    });
+    return card;
+  }
+
   function activeCard(state, run) {
+    if (isGames(run)) return activeCardGames(state, run);
     const href = `#/run/${encodeURIComponent(run.name)}`;
     const le = run.latest_eval && run.latest_eval["greedy-leave"];
     const evals = (state.metrics[run.name] || { gl: [] }).gl;
@@ -372,26 +532,52 @@
       href ? h("a", { class: "ov-more", href }, linkText) : null);
   }
 
-  function renderStrongest(el, top) {
+  function renderStrongest(el, top, topWins) {
     const slot = h("div");
-    el.replaceChildren(listHead("Strongest networks", "Each run's best evaluation against greedy + leave: points per game, 95% interval",
-      "#/models", "All models"), slot);
-    Charts.intervals(slot, {
-      rows: top.map((m) => {
-        const e = m.eval["greedy-leave"];
-        return { label: m.name, sub: `${m.network} · ${fmt.compact(m.games)} games`, value: e.spread, ci: e.ci,
-          href: m.run ? `#/run/${encodeURIComponent(m.run)}` : null,
-          detail: `Win rate ${fmt.pct(e.win_rate)}. ${verdict(e.spread, e.ci).replace(/^./, (c) => c.toUpperCase())}.` };
-      }),
-      center: 0, valueLabel: "points per game",
-      empty: "No network has been evaluated yet.",
-    });
+    const winSlot = h("div");
+    const both = top.length && topWins.length;
+    App.append(App.clear(el), [listHead("Strongest networks", topWins.length && !top.length
+      ? "Each run's best match against greedy + leave: share of games won, 95% interval"
+      : "Each run's best evaluation against greedy + leave: points per game, 95% interval",
+    "#/models", "All models"),
+    top.length || !topWins.length ? slot : null,
+    topWins.length ? h("div", { class: both ? "ov-strongest-wins" : null },
+      both ? h("div", { class: "card-sub ov-strongest-sub" }, "Trained from games, judged by wins: share of games won, 95% interval") : null,
+      winSlot) : null]);
+    if (top.length || !topWins.length) {
+      Charts.intervals(slot, {
+        rows: top.map((m) => {
+          const e = m.eval["greedy-leave"];
+          return { label: m.name, sub: `${m.network} · ${fmt.compact(m.games)} games`, value: e.spread, ci: e.ci,
+            href: m.run ? `#/run/${encodeURIComponent(m.run)}` : null,
+            detail: `Win rate ${fmt.pct(e.win_rate)}. ${verdict(e.spread, e.ci).replace(/^./, (c) => c.toUpperCase())}.` };
+        }),
+        center: 0, valueLabel: "points per game",
+        empty: "No network has been evaluated yet.",
+      });
+    }
+    if (topWins.length) {
+      // In percent, so the chart prints "53.4% ± 1.3" and centres on 50.
+      Charts.intervals(winSlot, {
+        rows: topWins.map((w) => ({ label: w.model.name, sub: `${window.LabKit.networkLabel(w.run)} · trained from games`,
+          value: 100 * w.win_rate, ci: typeof w.win_ci === "number" ? 100 * w.win_ci : null,
+          href: `#/run/${encodeURIComponent(w.run.name)}`,
+          detail: (typeof w.win_ci === "number" ? (w.win_rate - w.win_ci > 0.5 ? "The whole interval is above 50%: it wins more than it loses."
+            : w.win_rate + w.win_ci < 0.5 ? "The whole interval is below 50%: it loses more than it wins."
+              : "The interval includes 50%: not shown to win more than it loses.") : "No interval recorded.") +
+            " Networks trained from games are judged by wins, not points." })),
+        center: 50, format: (v) => v.toFixed(1) + "%", tickFormat: (v) => trimPct(v), valueLabel: "share of games won",
+      });
+    }
   }
+
+  const trimPct = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)) + "%";
 
   function renderRuns(el, recent) {
     const K = kit();
     el.replaceChildren(listHead("Recent runs", null, "#/training", "All runs"),
       recent.length ? h("ul", { class: "ov-list" }, recent.map((run) => {
+        if (isGames(run)) return recentGamesRow(run);
         const e = run.latest_eval && run.latest_eval["greedy-leave"];
         const chip = K ? K.healthChip(run.health, "ov-row-chip") : null;
         return h("li", null, h("a", { class: "ov-row ov-run-row", href: `#/run/${encodeURIComponent(run.name)}`,
@@ -406,6 +592,30 @@
             chip || h("div", { class: "ov-row-sub" }, e ? verdict(e.spread, e.ci) : run.status === "failed" ? "no result" : "not evaluated")),
           h("span", { class: "ov-row-go", html: ICON_ARROW, "aria-hidden": "true" })));
       })) : h("p", { class: "muted ov-none" }, "Finished runs appear here."));
+  }
+
+  /** A recent run that trained from games: its win rate, never its spread. */
+  function recentGamesRow(run) {
+    const K = kit();
+    const e = run.latest_eval && run.latest_eval["greedy-leave"];
+    const chip = K ? K.healthChip(run.health, "ov-row-chip", true) : null;
+    const label = (STATUS[run.status] || [run.status])[0];
+    const net = K ? K.networkLabel(run) : run.network;
+    return h("li", null, h("a", { class: "ov-row ov-run-row", href: `#/run/${encodeURIComponent(run.name)}`,
+      title: `Open ${run.name}: its charts, report, settings and log` },
+    h("div", { class: "ov-row-main" },
+      h("div", { class: "ov-row-title" }, h("span", { class: "ov-row-name ov-row-link" }, run.name)),
+      h("div", { class: "ov-row-sub", title: `${label} ${fmt.datetime(run.updated)} · ${net} · ${fmt.duration(run.hours)} · ` +
+        `${fmt.int(run.positions)} positions from ${run.game_set || "a game set"}` },
+      `${label} ${fmt.ago(run.updated)} · ${net} · from games`)),
+    h("div", { class: "ov-row-side" },
+      e && typeof e.win_rate === "number"
+        ? h("span", { class: "ov-row-value", title: "Share of games won against greedy + leave at the latest match, ± its 95% interval" },
+          fmt.pct(e.win_rate), typeof e.win_ci === "number" ? h("span", { class: "stat-ci" }, " ± " + (100 * e.win_ci).toFixed(1)) : null,
+          h("span", { class: "stat-ci" }, " of games"))
+        : h("span", { class: "ov-row-value" }, "–"),
+      chip || h("div", { class: "ov-row-sub" }, e ? winVerdict(e.win_rate, e.win_ci) : run.status === "failed" ? "no result" : "no match yet")),
+    h("span", { class: "ov-row-go", html: ICON_ARROW, "aria-hidden": "true" })));
   }
 
   function renderMatches(state, els) {

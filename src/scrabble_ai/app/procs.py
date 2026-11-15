@@ -52,6 +52,19 @@ def process_start_time(pid: int) -> float | None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+def clear_stale_stop(stop_file: Path) -> None:
+    """Called by a process as it starts: remove a STOP file an earlier process left behind (it
+    was killed before it could act on it), but keep one written since this process was created.
+    That one is a request to stop this process, made while it was still starting up."""
+    try:
+        written = stop_file.stat().st_mtime
+    except OSError:
+        return
+    created = process_start_time(os.getpid())
+    if created is None or written < created:
+        stop_file.unlink(missing_ok=True)
+
+
 def started_after(pid: int, moment: float) -> bool:
     """True when process `pid` was created after `moment`: it cannot be the process a marker
     written at `moment` names, only a later one that was given the same number."""
