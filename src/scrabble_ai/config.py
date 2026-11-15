@@ -46,6 +46,12 @@ class ModelConfig:
     value_channels: int = 8  # 1x1 conv channels flattened into the head (keeps positions)
     cross_checks: bool = True  # feed the cross-check planes (which letters fit on each square)
     leave_baseline: bool = True  # network predicts a correction to the static leave value
+    # Inputs added on 2026-11-14 (features.py). A checkpoint from before then has none of them.
+    extra_scalars: bool = True  # the move's score, the opponent's bingo history, make-up of the unseen pool and the leave
+    last_move_plane: bool = True  # where the opponent's previous move put its tiles
+    openness: bool = True  # which squares the next player can reach, how easily, and where seven tiles fit
+    hooks: bool = True  # where one letter extends a word on the board, and where an S does
+    belief_samples: int = 4  # racks sampled per placement to infer what the opponent kept (0 = no such input)
 
 
 @dataclass
@@ -111,6 +117,7 @@ class Config:
             (self.model.blocks >= 1, "model.blocks must be at least 1"),
             (self.model.channels >= 8, "model.channels must be at least 8"),
             (self.model.channels % 8 == 0, "model.channels must be a multiple of 8"),
+            (0 <= self.model.belief_samples <= 64, "model.belief_samples must be between 0 and 64"),
             (self.selfplay.games >= 1, "selfplay.games must be at least 1"),
             (2 <= self.selfplay.max_candidates <= 512, "selfplay.max_candidates must be between 2 and 512"),
             (0 <= self.selfplay.max_exchanges < self.selfplay.max_candidates,
@@ -237,9 +244,21 @@ def load_config(path: Path | None = None, overrides: list[str] | None = None) ->
     return config
 
 
+# Settings a checkpoint may not mention because they did not exist when it was written, with the
+# value that describes how things were then. (A missing setting cannot mean today's default: a
+# network saved before an input existed does not have that input.)
+BEFORE_IT_EXISTED: dict[str, dict[str, Any]] = {
+    "model": {"extra_scalars": False, "last_move_plane": False, "openness": False, "hooks": False, "belief_samples": 0},
+}
+
+
 def config_from_dict(data: dict[str, Any]) -> Config:
     """Rebuild a config saved in a checkpoint."""
     config = Config()
+    for section, earlier in BEFORE_IT_EXISTED.items():
+        saved = data.get(section)
+        if isinstance(saved, dict):
+            data = {**data, section: {**{key: value for key, value in earlier.items() if key not in saved}, **saved}}
     apply_dict(config, data)
     config.validate()
     return config

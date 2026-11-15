@@ -42,7 +42,11 @@ class GameSession:
         self.advisor = advisor
         self.players = players
         self.inference_lock = inference_lock
-        self.game = _core.Game(players.loaded.engine, players.loaded.leaves, seed)
+        # Networks that take an inference about the opponent's rack as an input need the game to
+        # make it, with as many sampled racks as the most demanding of them was trained with.
+        models = {spec for spec in (*specs, advisor) if players_module.kind(spec) == "model"}
+        belief_samples = max((getattr(players.scorer(spec), "belief_samples", 0) for spec in models), default=0)
+        self.game = _core.Game(players.loaded.engine, players.loaded.leaves, seed, belief_samples)
         self.seed = seed
         self.history: list[dict] = []
         self.analyses: dict[int, dict] = {}  # turn number -> what the player of that turn considered

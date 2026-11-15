@@ -35,7 +35,7 @@ import torch
 from scrabble_ai import engine as engine_module
 from scrabble_ai.config import Config, config_from_dict
 from scrabble_ai.evaluate import MatchResult, NetPlayer, eval_seeds, play_match
-from scrabble_ai.features import FeatureBuilder, to_device
+from scrabble_ai.features import FeatureBuilder, FeatureSet, engine_inputs, to_device
 from scrabble_ai.lexicon import REPO_ROOT
 from scrabble_ai.model import ValueNet, parameter_count
 from scrabble_ai.replay import Replay
@@ -118,7 +118,8 @@ class Trainer:
         self.worse_streak = 0  # evaluations in a row significantly behind the best
         self.rollbacks = 0
         amp = train.amp and self.device.type == "cuda"
-        self.features = FeatureBuilder(self.device, model.cross_checks, torch.bfloat16 if amp else torch.float32)
+        self.inputs = FeatureSet.of(model)
+        self.features = FeatureBuilder(self.device, self.inputs, torch.bfloat16 if amp else torch.float32)
         self.replay = Replay(train.replay_capacity)
 
         self.step = 0  # training steps taken
@@ -162,7 +163,8 @@ class Trainer:
         c = self.config
         return Actor(self.engine, self.leaves, self.replay, c.selfplay.games, c.selfplay.max_candidates,
                      c.selfplay.max_exchanges, c.train.td_lambda, self.device,
-                     first_seed=self.seed_base + 500_000_000, sampling_seed=c.run.seed + 1)
+                     first_seed=self.seed_base + 500_000_000, sampling_seed=c.run.seed + 1,
+                     belief_samples=c.model.belief_samples)
 
     def _scorer(self, net: ValueNet) -> Scorer:
         return Scorer(net, self.engine, self.config.train.value_scale, self.device, self.config.train.amp)
@@ -193,11 +195,9 @@ class Trainer:
     def train_step(self) -> None:
         train, model = self.config.train, self.config.model
         rows = self.replay.sample(train.batch_size, self.rng)
-        cross = None
-        if model.cross_checks:
-            cross = np.empty((train.batch_size, 450), np.uint32)
-            self.engine.cross_masks(rows["board"], cross)
-        batch = to_device(rows["board"], rows["leave"], rows["unseen"], rows["meta"], rows["leave_value"], cross, self.device)
+        cross, opened = engine_inputs(self.engine, self.inputs, rows["board"])
+        batch = to_device(rows["board"], rows["leave"], rows["unseen"], rows["meta"], rows["leave_value"], cross,
+                          self.device, opened)
         if train.augment_transpose:
             flip = torch.rand(train.batch_size, device=self.device, generator=self.generator) < 0.5
             batch = self.features.transpose(batch, flip)
@@ -249,7 +249,8 @@ class Trainer:
             actor = Actor(self.engine, self.leaves, self.replay, slots, warm.max_candidates,
                           min(self.config.selfplay.max_exchanges, warm.max_candidates - 2),
                           self.config.train.td_lambda, self.device,
-                          first_seed=self.warm_next_seed, sampling_seed=self.config.run.seed + 2 + self.warm_games)
+                          first_seed=self.warm_next_seed, sampling_seed=self.config.run.seed + 2 + self.warm_games,
+                          belief_samples=self.config.model.belief_samples)
             self._say(f"warm start: {warm.games - self.warm_games:,} games by the static evaluator "
                       f"(temperature {warm.temperature})")
             stats, start, last = ActorStats(), time.time(), time.time()

@@ -81,7 +81,7 @@ Everything the "new run" form needs.
 - `step` is how far the arrow keys move a number, not a rule. `multiple_of` is a rule (8 for
   `model.channels`, `null` elsewhere).
 - `unit` is what a number counts (`hours`, `games`, `points`, `steps`, `positions`, `minutes`,
-  `pairs`, `evaluations`) or `null`; show it beside the input.
+  `pairs`, `evaluations`, `racks`) or `null`; show it beside the input.
 - Every field also has `"effects": {"lower": "...", "higher": "...", "typical": "..."}`: what
   turning the setting down does, what turning it up does (for an on/off setting, `lower` is off
   and `higher` is on; for a choice, each describes one option), and the range worth trying. All

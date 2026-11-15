@@ -1,5 +1,6 @@
 //! Scrabble engine: NASPA two-player rules (docs/RULES.md), GADDAG move generation and scoring.
 
+pub mod belief;
 pub mod bench;
 pub mod board;
 pub mod encode;

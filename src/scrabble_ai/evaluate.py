@@ -94,7 +94,10 @@ def play_match(engine: _core.Engine, leaves: _core.LeaveModel, a: Player, b: Pla
 
     games = 2 * len(seeds)  # game 2i: A moves first; game 2i+1: B moves first
     slots = min(slots, games)
-    env = _core.BatchEnv(engine, leaves, slots, max_candidates, max_exchanges)
+    # A network that takes the inference about the opponent's rack as an input needs the
+    # environment to make it; one that does not ignores it.
+    belief_samples = max(getattr(player.scorer, "belief_samples", 0) for player in (a, b) if not isinstance(player, str))
+    env = _core.BatchEnv(engine, leaves, slots, max_candidates, max_exchanges, belief_samples)
     buffers = CandidateBuffers(slots, max_candidates)
     generator = torch.Generator(device=device)
     final = np.zeros((games, 2), np.int32)

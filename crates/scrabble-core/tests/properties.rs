@@ -7,8 +7,9 @@
 mod common;
 
 use rayon::prelude::*;
+use scrabble_core::belief::{apply_observed, infer};
 use scrabble_core::board::SQUARES;
-use scrabble_core::encode::{board_codes, encode_afterstate, META, M_OPPONENT_TILES};
+use scrabble_core::encode::{base_codes, encode_afterstate, META, M_BELIEF_INFERRED, M_OPPONENT_TILES};
 use scrabble_core::gaddag::Gaddag;
 use scrabble_core::game::{Game, SCORELESS_LIMIT};
 use scrabble_core::leave::LeaveModel;
@@ -153,7 +154,7 @@ type Encoded = Vec<(Move, [u8; SQUARES], [u8; TILE_TYPES], [u8; TILE_TYPES], [i1
 fn encode_all(game: &Game, gaddag: &Gaddag, leaves: &LeaveModel) -> Encoded {
     let mut scratch = Scratch::default();
     candidates(game, gaddag, leaves, &mut scratch);
-    let base = board_codes(&game.board);
+    let base = base_codes(game);
     let pool = game.unseen(game.to_move);
     scratch
         .candidates
@@ -188,10 +189,12 @@ fn hidden_rack_check(gaddag: &Gaddag, seeds: std::ops::Range<u64>) -> (usize, us
     for (i, weight) in leaves.weights[0].iter_mut().enumerate() {
         *weight = (i % 7) as f32 - 3.0; // arbitrary non-zero leave values
     }
-    let (mut hidden_checked, mut open_checked) = (0, 0);
+    let (mut hidden_checked, mut open_checked, mut with_inference) = (0, 0, 0);
+    let mut scratch = Scratch::default();
     for seed in seeds {
         let mut game = Game::new(seed);
         let mut rng = Rng::new(seed + 99);
+        let mut belief_rng = Rng::new(seed + 7);
         while !game.over {
             let (me, opponent) = (game.to_move, 1 - game.to_move);
             if game.bag.len() >= 7 {
@@ -207,11 +210,19 @@ fn hidden_rack_check(gaddag: &Gaddag, seeds: std::ops::Range<u64>) -> (usize, us
                 racks[opponent] = other_rack;
                 let mut twin = Game::from_position(game.board.clone(), racks, &pool[other_rack.len()..], game.scores, me, 5);
                 twin.scoreless_turns = game.scoreless_turns;
-                twin.last_turn = game.last_turn; // public: what each side did last turn
+                // Public: what each side did last turn and where, how long since each last placed
+                // seven tiles, and what each has inferred from the other's play (which is worked
+                // out from public facts alone: see the test of the inference below).
+                twin.last_turn = game.last_turn;
+                twin.last_play = game.last_play;
+                twin.since_bingo = game.since_bingo;
+                twin.belief = game.belief;
                 assert_eq!(twin.tile_census(), TILE_COUNTS);
                 if other_rack != game.racks[opponent] {
-                    assert!(encode_all(&game, gaddag, &leaves) == encode_all(&twin, gaddag, &leaves), "seed {seed}");
+                    let encoded = encode_all(&game, gaddag, &leaves);
+                    assert!(encoded == encode_all(&twin, gaddag, &leaves), "seed {seed}");
                     hidden_checked += 1;
+                    with_inference += (encoded[0].4[M_BELIEF_INFERRED] == 1) as usize;
                 }
             } else if game.bag.is_empty() {
                 // With the bag empty the unseen pool IS the opponent's rack, and that is public.
@@ -226,9 +237,64 @@ fn hidden_rack_check(gaddag: &Gaddag, seeds: std::ops::Range<u64>) -> (usize, us
             let moves = game.legal_moves(gaddag);
             let plays: Vec<&Move> = moves.iter().filter(|m| matches!(m, Move::Play(_))).collect();
             let mv = if plays.is_empty() { moves[moves.len() - 1] } else { *plays[rng.below(plays.len() as u32) as usize] };
+            apply_observed(&mut game, &mv, gaddag, &leaves, 2, &mut belief_rng, &mut scratch);
+        }
+    }
+    assert!(with_inference > hidden_checked / 2, "most of the positions carried an inference: {with_inference} of {hidden_checked}");
+    println!("{hidden_checked} positions with a hidden rack swapped, {open_checked} endgame afterstates checked");
+    (hidden_checked, open_checked)
+}
+
+/// What a placement lets the other player infer about the mover's rack must be worked out from
+/// what that player can see: the board, the move, and the pool of unseen tiles as a whole. So if
+/// the tiles the mover actually kept are exchanged for others from the bag, with the same move
+/// played, the inference must not change by one count.
+#[test]
+fn the_inference_about_a_rack_does_not_depend_on_the_tiles_actually_kept() {
+    let gaddag = common::mini_gaddag();
+    let mut leaves = LeaveModel::zero();
+    for (i, weight) in leaves.weights[0].iter_mut().enumerate() {
+        *weight = (i % 7) as f32 - 3.0;
+    }
+    let mut scratch = Scratch::default();
+    let (mut checked, mut inferred) = (0, 0);
+    for seed in 0..60u64 {
+        let mut game = Game::new(seed);
+        let mut rng = Rng::new(seed + 31);
+        while !game.over {
+            let me = game.to_move;
+            let moves = game.legal_moves(&gaddag);
+            let plays: Vec<&Move> = moves.iter().filter(|m| matches!(m, Move::Play(_))).collect();
+            let mv = if plays.is_empty() { moves[moves.len() - 1] } else { *plays[rng.below(plays.len() as u32) as usize] };
+            if let Move::Play(play) = &mv {
+                let used = play.tiles_used();
+                let mut kept = game.racks[me];
+                kept.remove_all(&used);
+                // The same hidden pool (the bag and the kept tiles), dealt differently.
+                let mut pool: Vec<u8> = game.bag.tiles().to_vec();
+                pool.extend(kept.tiles());
+                rng.shuffle(&mut pool);
+                let mut other = used;
+                for &tile in &pool[..kept.len()] {
+                    other.add(tile);
+                }
+                let mut racks = game.racks;
+                racks[me] = other;
+                let mut twin = Game::from_position(game.board.clone(), racks, &pool[kept.len()..], game.scores, me, 5);
+                twin.scoreless_turns = game.scoreless_turns;
+                assert_eq!(twin.tile_census(), TILE_COUNTS);
+                if other != game.racks[me] {
+                    let stream = seed * 1000 + game.turn as u64;
+                    let ours = infer(&game, play, &gaddag, &leaves, 5, &mut Rng::new(stream), &mut scratch);
+                    let theirs = infer(&twin, play, &gaddag, &leaves, 5, &mut Rng::new(stream), &mut scratch);
+                    assert_eq!(ours, theirs, "seed {seed}, turn {}", game.turn);
+                    checked += 1;
+                    inferred += ours.is_some() as usize;
+                }
+            }
             game.apply(&mv);
         }
     }
-    println!("{hidden_checked} positions with a hidden rack swapped, {open_checked} endgame afterstates checked");
-    (hidden_checked, open_checked)
+    println!("{checked} placements checked, {inferred} with an inference");
+    assert!(checked > 300 && inferred > 200, "{checked} placements checked, {inferred} with an inference");
 }

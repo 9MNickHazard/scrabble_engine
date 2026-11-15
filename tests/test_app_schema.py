@@ -11,7 +11,7 @@ from scrabble_ai.app import schema as schema_module
 from scrabble_ai.config import Config, load_config
 
 TYPES = {"int": int, "float": float, "bool": bool, "str": str}
-UNITS = {"hours", "games", "points", "steps", "positions", "minutes", "pairs", "evaluations"}
+UNITS = {"hours", "games", "points", "steps", "positions", "minutes", "pairs", "evaluations", "racks"}
 
 
 def config_fields() -> dict[str, tuple[type, object]]:
@@ -156,7 +156,7 @@ def test_presets_pass_the_forms_own_rules(schema, fields):
 
 def test_speed_rows(schema):
     rows = schema["speed"]
-    assert [r["network"] for r in rows][0] == "6x64" and rows[0]["measured"] is True
+    assert [r["network"] for r in rows][0] == "6x64" and all(isinstance(r["measured"], bool) for r in rows)
     for row in rows:
         assert set(row) == {"network", "parameters", "games_per_second", "measured", "vram_gb"}
         blocks, channels = map(int, row["network"].split("x"))

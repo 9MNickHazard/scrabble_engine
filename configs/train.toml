@@ -40,6 +40,22 @@ cross_checks = true     # give the network the cross-check planes: for every emp
                         # sees the dictionary. Turn off only to measure what it is worth.
 leave_baseline = true   # the network outputs a correction to the static leave value, so an
                         # untrained network already plays like the greedy+leave bot
+# Inputs added on 2026-11-14 (src/scrabble_ai/features.py lists them exactly). Each can be turned
+# off to measure what it is worth; a network saved before that date has none of them, and like
+# the rest of this section they cannot change once a run has started.
+extra_scalars = true    # the move's score, how long since the opponent last played all seven
+                        # tiles, how much of the unseen pool is blanks, S, J, Q, X, Z, and the
+                        # vowel balance of the pool and of the kept tiles
+last_move_plane = true  # where the opponent's previous move put its tiles
+openness = true         # which empty squares the next player can reach and with how few tiles,
+                        # where seven tiles fit, and which triple- and double-word squares are
+                        # in reach
+hooks = true            # the squares where one letter extends a word on the board, how many
+                        # letters fit there, and where an S does
+belief_samples = 4      # after each placement, sample this many racks the mover might have had
+                        # and weigh each by how good the move played would have been with it;
+                        # the expected tiles on the opponent's rack are an input. Each sample
+                        # costs one full move generation per move played. 0 = no such input.
 
 [selfplay]
 games = 256             # games played in lockstep (speed is flat from 256 to 512)
@@ -77,7 +93,7 @@ td_lambda = 0.7         # 1 = Monte Carlo targets: the spread actually gained fr
                         # whose noise (about 75 points) is what the networks memorised. Below 1,
                         # targets lean on the estimate of the next position instead: far less noise,
                         # some bias. 0.5 to 0.8 is the range to try.
-replay_capacity = 3000000  # positions kept, about 310 bytes each (3M = 0.9 GB of RAM)
+replay_capacity = 3000000  # positions kept, about 370 bytes each (3M = 1.1 GB of RAM)
 min_replay = 100000     # positions needed before training starts
 replay_ratio = 1.0      # training samples drawn per new self-play position. At 1 each position is
                         # trained on about once. Above 1 the network sees the same games repeatedly

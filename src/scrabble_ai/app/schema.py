@@ -94,6 +94,35 @@ _FIELDS: dict[str, dict] = {
         "Off: it must learn leave values itself and starts far weaker than greedy + leave.",
         "On: an untrained network already plays like greedy + leave, and training can only add to that.",
         "on", locked=True),
+    "model.extra_scalars": _f(
+        "Extra facts", "Thirteen numbers the network would otherwise have to work out: the points the move scored, "
+        "how long since the opponent last played all seven tiles, how much of the unseen pool is blanks, S, J, Q, X "
+        "and Z, and the vowel balance of the pool and of the kept tiles.",
+        "Off: only to measure what they are worth.", "On: the default. They cost nothing measurable.",
+        "on", locked=True),
+    "model.last_move_plane": _f(
+        "Opponent's last move", "Marks the squares where the opponent's previous move put its tiles.",
+        "Off: the network knows how many tiles they placed and for how many points, but not where.",
+        "On: the default. It costs nothing measurable.", "on", locked=True),
+    "model.openness": _f(
+        "Board openness", "What the next player could do with the board a move leaves: which empty squares a "
+        "placement can reach and with how few tiles, where seven tiles fit, and which triple- and double-word "
+        "squares are in reach.",
+        "Off: the network must work reach out from the tiles and the cross-check planes, a few squares at a time.",
+        "On: the default. The engine works it out for every candidate: 7 to 11 microseconds a board on one "
+        "core, against 3 to 8 for the cross-check masks.", "on", locked=True),
+    "model.hooks": _f(
+        "Hook squares", "Marks the squares where one letter extends a word already on the board, in front of it or "
+        "after it, with how many letters fit there and where an S does.",
+        "Off: the same facts are in the cross-check planes, less directly.",
+        "On: the default. Worked out on the GPU from the cross-check masks.", "on", locked=True),
+    "model.belief_samples": _f(
+        "Opponent-rack inference", "After each placement the engine samples this many racks the mover might have "
+        "had and weighs each by how good the move played would have been with it. The expected tiles on the "
+        "opponent's rack are then an input. 0 leaves the input out.",
+        "Cheaper and a rougher estimate. 0: no inference, and the network has no such input.",
+        "A steadier estimate. Each sample is one full move generation per move played, so self-play slows down.",
+        "0, or 4 to 12", min=0, max=64, step=1, locked=True),
     # ---- selfplay ----------------------------------------------------------------------------
     "selfplay.games": _f(
         "Games in lockstep", "Self-play games advanced together.",
@@ -197,7 +226,7 @@ _FIELDS: dict[str, dict] = {
         "memorising them. 1.0 was what the first two runs used.",
         "0.5 to 0.8", min=0, max=1, step=0.05),
     "train.replay_capacity": _f(
-        "Replay capacity", "Positions kept in RAM, about 310 bytes each: 3 million is 0.9 GB.",
+        "Replay capacity", "Positions kept in RAM, about 370 bytes each: 3 million is 1.1 GB.",
         "Only recent games are kept: less memory, less variety.", "More variety and more memory; old games stay longer.",
         "2,000,000 to 10,000,000", min=1_000, max=100_000_000, step=500_000),
     "train.min_replay": _f(
@@ -278,6 +307,7 @@ _UNITS = {
     "train.eval_pairs": "pairs",
     "train.gate_pairs": "pairs",
     "train.guard_patience": "evaluations",
+    "model.belief_samples": "racks",
 }
 
 # The form asks for the name itself, and the app decides where runs live.
@@ -286,10 +316,10 @@ HIDDEN = {"run.name", "run.out_dir"}
 _SECTION_TITLES = {"run": "Run", "model": "Network", "selfplay": "Self-play", "warmstart": "Warm start", "train": "Training"}
 
 PRESETS = [
-    {"name": "Default 6x64", "description": "About 57 games a second. The size to get working first.", "overrides": {}},
-    {"name": "Larger 10x128", "description": "About 18 games a second. Try it once the default has clearly learned something.",
+    {"name": "Default 6x64", "description": "The size to get working first. About 57 games a second with the earlier inputs; not timed with the new ones yet.", "overrides": {}},
+    {"name": "Larger 10x128", "description": "Try it once the default has clearly learned something. About 18 games a second with the earlier inputs.",
      "overrides": {"model.blocks": 10, "model.channels": 128}},
-    {"name": "Wide 12x192", "description": "About 8.5 games a second: a weekend run. Fewer candidates and a shorter exploration decay to suit.",
+    {"name": "Wide 12x192", "description": "A weekend run: an estimated 8.5 games a second. Fewer candidates and a shorter exploration decay to suit.",
      "overrides": {"model.blocks": 12, "model.channels": 192, "selfplay.max_candidates": 32,
                    "selfplay.temperature_decay_games": 100_000}},
     {"name": "Quick test (30 minutes)", "description": "A short run to check everything works. Too short to learn much.",
@@ -301,12 +331,18 @@ PRESETS = [
 # first two real runs (2026-11-13: 450,005 games in 2.19 h and 441,805 games in 6.67 h, with a
 # replay ratio of 4; the current default of 1 leaves more of the GPU for self-play, so expect
 # somewhat more). The larger sizes are worked out from separately measured speeds.
+#
+# Every figure was measured with the inputs of before 2026-11-14. The inputs added then make
+# each decision cost the engine more (openness for every candidate, and the opponent-rack
+# inference at `model.belief_samples` move generations per move played), which has not been
+# timed on the GPU yet, so no size is marked as measured until it has. The parameter counts are
+# those of networks with the current default inputs.
 SPEED = [
-    {"network": "6x64", "parameters": 1_055_056, "games_per_second": 57, "measured": True, "vram_gb": 1.4},
-    {"network": "10x128", "parameters": 3_655_316, "games_per_second": 18, "measured": True, "vram_gb": 4.1},
-    {"network": "12x192", "parameters": 8_762_582, "games_per_second": 8.5, "measured": False, "vram_gb": 7.1},
-    {"network": "16x192", "parameters": 11_418_330, "games_per_second": 6, "measured": False, "vram_gb": 9.1},
-    {"network": "20x256", "parameters": 24_490_270, "games_per_second": 3.4, "measured": False, "vram_gb": 7.6},
+    {"network": "6x64", "parameters": 1_071_760, "games_per_second": 57, "measured": False, "vram_gb": 1.4},
+    {"network": "10x128", "parameters": 3_679_508, "games_per_second": 18, "measured": False, "vram_gb": 4.1},
+    {"network": "12x192", "parameters": 8_794_262, "games_per_second": 8.5, "measured": False, "vram_gb": 7.1},
+    {"network": "16x192", "parameters": 11_450_010, "games_per_second": 6, "measured": False, "vram_gb": 9.1},
+    {"network": "20x256", "parameters": 24_529_438, "games_per_second": 3.4, "measured": False, "vram_gb": 7.6},
 ]
 
 _TYPE_NAMES = {"int": "int", "float": "float", "bool": "bool", "str": "str"}

@@ -83,6 +83,21 @@ pub struct LastTurn {
     pub score: i16,
 }
 
+/// What a player has worked out about the other player's rack from their last placement (see
+/// `belief.rs`). Without an inference the rack is just a random draw from the unseen pool.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Belief {
+    pub inferred: bool,
+    /// Expected number of each tile type on the other player's rack, times `belief::SCALE`.
+    pub counts: [i16; TILE_TYPES],
+}
+
+impl Default for Belief {
+    fn default() -> Belief {
+        Belief { inferred: false, counts: [0; TILE_TYPES] }
+    }
+}
+
 /// What a turn did to the scores.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Applied {
@@ -108,6 +123,13 @@ pub struct Game {
     pub over: bool,
     /// Each player's most recent turn.
     pub last_turn: [LastTurn; 2],
+    /// Each player's most recent turn if it was a placement: where the tiles went.
+    pub last_play: [Option<Play>; 2],
+    /// Turns each player has taken since they last placed all seven tiles; -1 until they have.
+    pub since_bingo: [i16; 2],
+    /// `belief[p]`: what player `p` has inferred about the other player's rack. Cleared whenever
+    /// the other player moves; `belief::apply_observed` fills it in.
+    pub belief: [Belief; 2],
     rng: Rng,
 }
 
@@ -134,6 +156,9 @@ impl Game {
             turn: 0,
             over: false,
             last_turn: [LastTurn::default(); 2],
+            last_play: [None; 2],
+            since_bingo: [-1; 2],
+            belief: [Belief::default(); 2],
             rng,
         };
         game.refill(0);
@@ -154,6 +179,9 @@ impl Game {
             turn: 0,
             over: false,
             last_turn: [LastTurn::default(); 2],
+            last_play: [None; 2],
+            since_bingo: [-1; 2],
+            belief: [Belief::default(); 2],
             rng: Rng::new(seed),
         }
     }
@@ -247,6 +275,19 @@ impl Game {
             Move::Exchange(tiles) => LastTurn { kind: 2, tiles: tiles.len() as u8, score: 0 },
             Move::Pass => LastTurn { kind: 3, tiles: 0, score: 0 },
         };
+        self.last_play[me] = match mv {
+            Move::Play(play) => Some(*play),
+            _ => None,
+        };
+        let bingo = matches!(mv, Move::Play(play) if play.tiles_played as usize == RACK_SIZE);
+        self.since_bingo[me] = match self.since_bingo[me] {
+            _ if bingo => 0,
+            turns if turns >= 0 => turns.saturating_add(1),
+            never => never,
+        };
+        // The mover's rack is about to change, so what the other player had inferred about it is
+        // out of date.
+        self.belief[opponent] = Belief::default();
         match mv {
             Move::Play(play) => {
                 for tile in play.placed() {
@@ -423,5 +464,27 @@ mod tests {
         assert!(short.legal_moves(&gaddag()).iter().all(|m| !matches!(m, Move::Exchange(_))));
         let enough = Game::from_position(Board::new(), [before, game.racks[1]], &[0; 7], [0, 0], 0, 0);
         assert!(enough.legal_moves(&gaddag()).iter().any(|m| matches!(m, Move::Exchange(_))));
+    }
+
+    #[test]
+    fn turns_since_a_bingo_are_counted_per_player() {
+        let gaddag = Gaddag::build(&["RETAINS", "AT", "TA", "EE"]);
+        let racks = [Rack::parse("RETAINS").unwrap(), Rack::parse("ATEEEEE").unwrap()];
+        let mut game = Game::from_position(Board::new(), racks, &[4u8; 30], [0, 0], 0, 1);
+        assert_eq!(game.since_bingo, [-1, -1]);
+        let mut plays = Vec::new();
+        game.plays(&gaddag, &mut plays);
+        let bingo = plays.iter().find(|p| p.tiles_played == 7).copied().expect("RETAINS");
+        game.apply(&Move::Play(bingo));
+        assert_eq!(game.since_bingo, [0, -1]);
+        assert_eq!(game.last_play[0], Some(bingo));
+        game.apply(&Move::Pass);
+        assert_eq!(game.since_bingo, [0, -1], "the other player's turns do not count");
+        assert_eq!(game.last_play, [Some(bingo), None]);
+        game.apply(&Move::Pass);
+        game.apply(&Move::Pass);
+        game.apply(&Move::Pass);
+        assert_eq!(game.since_bingo, [2, -1]);
+        assert_eq!(game.last_play, [None, None]);
     }
 }

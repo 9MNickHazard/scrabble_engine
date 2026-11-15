@@ -1,7 +1,8 @@
 """Replay buffer: a fixed-size ring of afterstates with their training targets, in RAM.
 
-Each position is stored as the engine's compact codes (about 310 bytes), not as input planes.
-Cross-check masks are recomputed from the board when a batch is sampled, so they cost no memory.
+Each position is stored as the engine's compact codes (about 370 bytes), not as input planes.
+Cross-check masks and openness are recomputed from the board when a batch is sampled, so they
+cost no memory.
 """
 
 from __future__ import annotations
@@ -100,6 +101,15 @@ class Replay:
         count = lengths.pop()
         keep = min(count, self.capacity)
         for name, array in self.arrays.items():
+            if name == "meta" and saved[name].shape[1] < array.shape[1]:
+                # Saved before the metadata grew (2026-11-14): the entries it lacks say "the
+                # opponent has not placed seven tiles" and "nothing inferred about their rack".
+                # Only networks without those inputs can have such a buffer.
+                width = saved[name].shape[1]
+                array[:keep, :width] = saved[name][count - keep:]
+                array[:keep, width:] = 0
+                array[:keep, _core.M_OPPONENT_SINCE_BINGO] = -1
+                continue
             array[:keep] = saved[name][count - keep:]
         self.size = keep
         self.next = keep % self.capacity

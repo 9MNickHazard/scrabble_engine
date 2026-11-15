@@ -154,7 +154,7 @@ def _bench(args: argparse.Namespace) -> int:
     from scrabble_ai.bench import run
 
     return run(args.lexicon, args.leaves, args.models.split(","), args.norm, args.slots, args.candidates,
-               args.batch, args.quick, not args.no_gpu)
+               args.batch, args.quick, not args.no_gpu, args.inputs)
 
 
 def _app(args: argparse.Namespace) -> int:
@@ -222,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--leaves", default="")
     be.add_argument("--quick", action="store_true", help="smaller samples: a fast sanity check, noisier numbers")
     be.add_argument("--no-gpu", action="store_true", help="engine sections only")
+    be.add_argument("--inputs", default="all", choices=["all", "original"],
+                    help="time networks with every input group, or with only those of before 2026-11-14")
     be.set_defaults(func=_bench)
 
     ap = commands.add_parser("app", help="open Scrabble Lab, the desktop app")

@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from scrabble_ai import _core
-from scrabble_ai.features import FeatureBuilder, to_device
+from scrabble_ai.features import FeatureBuilder, FeatureSet, engine_inputs, to_device
 from scrabble_ai.replay import Replay
 
 MAX_TURNS = 128  # afterstates remembered per game; games are about 24 turns long
@@ -60,18 +60,18 @@ class Scorer:
         self.value_scale = value_scale
         self.device = device
         self.amp = amp and device.type == "cuda"
-        self.cross_checks = net.config.cross_checks
+        self.inputs = FeatureSet.of(net.config)
+        self.cross_checks = self.inputs.cross_checks
+        # What the environment has to work out for this network's inputs.
+        self.belief_samples = net.config.belief_samples
         self.leave_baseline = net.config.leave_baseline
-        self.features = FeatureBuilder(device, self.cross_checks, torch.bfloat16 if self.amp else torch.float32)
+        self.features = FeatureBuilder(device, self.inputs, torch.bfloat16 if self.amp else torch.float32)
 
     @torch.inference_mode()
     def __call__(self, board: np.ndarray, leave: np.ndarray, unseen: np.ndarray, meta: np.ndarray,
                  leave_value: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         self.net.eval()
-        cross = None
-        if self.cross_checks:
-            cross = np.empty((len(board), _core.CROSS_WORDS), np.uint32)
-            self.engine.cross_masks(board, cross)
+        cross, opened = engine_inputs(self.engine, self.inputs, board)
         values, wins = [], []
         for start in range(0, len(board), self.CHUNK):
             rows = np.arange(start, min(start + self.CHUNK, len(board)))
@@ -80,7 +80,8 @@ class Scorer:
             if padding:
                 rows = np.concatenate([rows, np.full(padding, rows[0])])
             batch = to_device(board[rows], leave[rows], unseen[rows], meta[rows], leave_value[rows],
-                              None if cross is None else cross[rows], self.device)
+                              None if cross is None else cross[rows], self.device,
+                              None if opened is None else opened[rows])
             planes, vector = self.features(batch)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp):
                 value, win_logit = self.net(planes, vector)
@@ -222,8 +223,10 @@ class Actor:
 
     def __init__(self, engine: _core.Engine, leaves: _core.LeaveModel, replay: Replay, slots: int,
                  max_candidates: int, max_exchanges: int, td_lambda: float, device: torch.device,
-                 first_seed: int, sampling_seed: int):
-        self.env = _core.BatchEnv(engine, leaves, slots, max_candidates, max_exchanges)
+                 first_seed: int, sampling_seed: int, belief_samples: int = 0):
+        """`belief_samples`: racks sampled per placement to infer what its player kept, for
+        networks that take that inference as an input (`model.belief_samples`)."""
+        self.env = _core.BatchEnv(engine, leaves, slots, max_candidates, max_exchanges, belief_samples)
         self.buffers = CandidateBuffers(slots, max_candidates)
         self.replay = replay
         self.td_lambda = td_lambda

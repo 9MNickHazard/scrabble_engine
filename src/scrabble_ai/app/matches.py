@@ -59,7 +59,8 @@ def play_match_detailed(engine, leaves, scorers: dict, a: str, b: str, seeds: np
 
     games = 2 * len(seeds)  # game 2i: A moves first; game 2i+1: B moves first
     slots = max(1, min(slots, games))
-    env = _core.BatchEnv(engine, leaves, slots, candidates, min(exchanges, candidates - 1))
+    belief_samples = max((getattr(scorer, "belief_samples", 0) for scorer in scorers.values()), default=0)
+    env = _core.BatchEnv(engine, leaves, slots, candidates, min(exchanges, candidates - 1), belief_samples)
     buffers = CandidateBuffers(slots, candidates)
     generator = None
     if scorers:

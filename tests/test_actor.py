@@ -112,7 +112,7 @@ def check_game(block, record):
     hidden = block["unseen"].astype(np.int64).sum(axis=1)
     np.testing.assert_array_equal(on_board + held + hidden, 100)
     # Board codes only use the documented bits.
-    assert ((block["board"] & ~np.uint8(_core.CODE_LETTER | _core.CODE_BLANK | _core.CODE_PLACED)) == 0).all()
+    assert ((block["board"] & ~np.uint8(_core.CODE_LETTER | _core.CODE_BLANK | _core.CODE_PLACED | _core.CODE_OPPONENT)) == 0).all()
     assert ((block["board"] & _core.CODE_LETTER) <= 26).all()
     return final, meta
 

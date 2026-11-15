@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from scrabble_ai.config import ModelConfig
-from scrabble_ai.features import SQUARES, VECTOR, plane_count
+from scrabble_ai.features import SQUARES, FeatureSet
 
 
 class ResidualBlock(nn.Module):
@@ -47,9 +47,11 @@ class ValueNet(nn.Module):
         super().__init__()
         self.config = config
         channels = config.channels
-        self.stem = nn.Conv2d(plane_count(config.cross_checks), channels, 3, padding=1)
+        self.features = FeatureSet.of(config)
+        self.stem = nn.Conv2d(self.features.planes, channels, 3, padding=1)
         self.vector = nn.Sequential(
-            nn.Linear(VECTOR, config.vector_hidden), nn.ReLU(), nn.Linear(config.vector_hidden, config.vector_hidden), nn.ReLU()
+            nn.Linear(self.features.vector, config.vector_hidden), nn.ReLU(),
+            nn.Linear(config.vector_hidden, config.vector_hidden), nn.ReLU(),
         )
         self.vector_to_stem = nn.Linear(config.vector_hidden, channels)
         self.blocks = nn.Sequential(*[ResidualBlock(channels, config.norm) for _ in range(config.blocks)])

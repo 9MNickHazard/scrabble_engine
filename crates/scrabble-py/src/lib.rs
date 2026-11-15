@@ -7,6 +7,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyReadwri
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use scrabble_core::belief;
 use scrabble_core::board::{Board, LETTER_MULT, SQUARES, WORD_MULT};
 use scrabble_core::encode;
 use scrabble_core::env::{self, Buffers, Controller};
@@ -94,6 +95,24 @@ impl Engine {
     /// Play each seed twice with the two bots swapping seats. Returns arrays with one entry per
     /// seed: `spread_first` / `spread_second` (A's spread when moving first / second),
     /// `score_a`, `score_b` and `turns` (each `[n, 2]`, flattened row-major).
+    /// How open each square of each board is to the next player: `boards uint8[n, 225]` and
+    /// their cross masks `cross uint32[n, 450]` in, `out uint8[n, 225]` out (see `OPEN_TILES`
+    /// and `OPEN_SEVEN`).
+    fn open_squares(
+        &self,
+        py: Python<'_>,
+        boards: PyReadonlyArray2<'_, u8>,
+        cross: PyReadonlyArray2<'_, u32>,
+        mut out: PyReadwriteArray2<'_, u8>,
+    ) -> PyResult<()> {
+        let (boards, cross, out) = (boards.as_slice()?, cross.as_slice()?, out.as_slice_mut()?);
+        if boards.len() % SQUARES != 0 || cross.len() != boards.len() / SQUARES * encode::CROSS_WORDS || out.len() != boards.len() {
+            return Err(value_error("expected boards uint8[n, 225], cross uint32[n, 450] and out uint8[n, 225]".into()));
+        }
+        py.detach(|| encode::open_squares_batch(boards, cross, out));
+        Ok(())
+    }
+
     #[pyo3(signature = (bot_a, leaves_a, bot_b, leaves_b, seeds))]
     fn play_pairs<'py>(
         &self,
@@ -195,13 +214,23 @@ struct BatchEnv {
 
 #[pymethods]
 impl BatchEnv {
+    /// `belief_samples`: racks sampled per placement to infer what the mover kept (0: no
+    /// inference; the afterstates then say nothing is known about the opponent's rack).
     #[new]
-    fn new(engine: &Engine, leaves: &LeaveModel, slots: usize, max_candidates: usize, max_exchanges: usize) -> PyResult<BatchEnv> {
+    #[pyo3(signature = (engine, leaves, slots, max_candidates, max_exchanges, belief_samples=0))]
+    fn new(
+        engine: &Engine,
+        leaves: &LeaveModel,
+        slots: usize,
+        max_candidates: usize,
+        max_exchanges: usize,
+        belief_samples: usize,
+    ) -> PyResult<BatchEnv> {
         if max_candidates < 2 || max_exchanges >= max_candidates {
             return Err(value_error("need max_candidates >= 2 and max_exchanges < max_candidates".into()));
         }
         Ok(BatchEnv {
-            env: env::BatchEnv::new(slots, max_candidates, max_exchanges),
+            env: env::BatchEnv::new(slots, max_candidates, max_exchanges).with_belief_samples(belief_samples),
             gaddag: engine.gaddag.clone(),
             leaves: leaves.model.clone(),
         })
@@ -215,6 +244,11 @@ impl BatchEnv {
     #[getter]
     fn max_candidates(&self) -> usize {
         self.env.max_candidates()
+    }
+
+    #[getter]
+    fn belief_samples(&self) -> usize {
+        self.env.belief_samples()
     }
 
     /// Start a new game in `slot`. Controllers are "external", "random", "greedy" or
@@ -280,12 +314,13 @@ impl BatchEnv {
     }
 
     /// Play `actions[slot]`, an index into that slot's candidates, wherever a decision is pending.
-    fn apply(&mut self, actions: PyReadonlyArray1<'_, i32>) -> PyResult<()> {
+    fn apply(&mut self, py: Python<'_>, actions: PyReadonlyArray1<'_, i32>) -> PyResult<()> {
         let actions = actions.as_slice()?;
         if actions.len() != self.env.len() {
             return Err(value_error("one action per slot is required".into()));
         }
-        self.env.apply(actions).map_err(value_error)
+        let (env, gaddag, leaves) = (&mut self.env, &*self.gaddag, &*self.leaves);
+        py.detach(|| env.apply(gaddag, leaves, actions)).map_err(value_error)
     }
 
     /// Text of candidate `index` of the pending decision in `slot`, e.g. "8D QUIZ 48".
@@ -414,6 +449,10 @@ struct Game {
     seed: u64,
     /// The baseline bots' random stream, seeded as in matches so a match game replays here.
     bot_rng: Rng,
+    /// Racks sampled per placement to infer what the mover kept, and the stream they come from
+    /// (seeded as in matches, like the bots' stream).
+    belief_samples: usize,
+    belief_rng: Rng,
 }
 
 /// A candidate as Python sees it: the move, plus `score` (with the going-out bonus), `bonus`
@@ -445,7 +484,16 @@ impl Game {
         let mut leave = rack_before;
         leave.remove_all(&mv.tiles_used());
         let out = describe_move(py, &mv)?;
-        let applied = self.game.apply(&mv);
+        let mut scratch = Scratch::default();
+        let applied = belief::apply_observed(
+            &mut self.game,
+            &mv,
+            &self.gaddag,
+            &self.leaves,
+            self.belief_samples,
+            &mut self.belief_rng,
+            &mut scratch,
+        );
         self.offered.clear();
         out.set_item("player", mover)?;
         out.set_item("score", applied.score)?;
@@ -460,7 +508,8 @@ impl Game {
 #[pymethods]
 impl Game {
     #[new]
-    fn new(engine: &Engine, leaves: &LeaveModel, seed: u64) -> Game {
+    #[pyo3(signature = (engine, leaves, seed, belief_samples=0))]
+    fn new(engine: &Engine, leaves: &LeaveModel, seed: u64, belief_samples: usize) -> Game {
         Game {
             game: CoreGame::new(seed),
             gaddag: engine.gaddag.clone(),
@@ -468,6 +517,8 @@ impl Game {
             offered: Vec::new(),
             seed,
             bot_rng: Rng::new(seed ^ 0xB07_5EED),
+            belief_samples,
+            belief_rng: Rng::new(seed ^ 0xBE11_EF5),
         }
     }
 
@@ -536,7 +587,7 @@ impl Game {
         let mut unseen = vec![0u8; k * TILE_TYPES];
         let mut meta = vec![0i16; k * encode::META];
         let mut leave_value = vec![0f32; k];
-        let base = encode::board_codes(&self.game.board);
+        let base = encode::base_codes(&self.game);
         let pool = self.game.unseen(self.game.to_move);
         let mut descriptions = Vec::with_capacity(k);
         for (i, candidate) in self.offered.iter().enumerate() {
@@ -660,6 +711,10 @@ fn core_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CODE_LETTER", encode::CODE_LETTER)?;
     m.add("CODE_BLANK", encode::CODE_BLANK)?;
     m.add("CODE_PLACED", encode::CODE_PLACED)?;
+    m.add("CODE_OPPONENT", encode::CODE_OPPONENT)?;
+    m.add("OPEN_TILES", encode::OPEN_TILES)?;
+    m.add("OPEN_SEVEN", encode::OPEN_SEVEN)?;
+    m.add("BELIEF_SCALE", belief::SCALE)?;
     m.add("CROSS_HAS_WORD", encode::CROSS_HAS_WORD)?;
     m.add("CROSS_WORDS", encode::CROSS_WORDS)?;
     m.add("META", encode::META)?;
@@ -674,6 +729,9 @@ fn core_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("M_OPPONENT_LAST_KIND", encode::M_OPPONENT_LAST_KIND)?;
     m.add("M_OPPONENT_LAST_TILES", encode::M_OPPONENT_LAST_TILES)?;
     m.add("M_OPPONENT_LAST_SCORE", encode::M_OPPONENT_LAST_SCORE)?;
+    m.add("M_OPPONENT_SINCE_BINGO", encode::M_OPPONENT_SINCE_BINGO)?;
+    m.add("M_BELIEF_INFERRED", encode::M_BELIEF_INFERRED)?;
+    m.add("M_BELIEF", encode::M_BELIEF)?;
 
     m.add("STATUS_EMPTY", env::STATUS_EMPTY)?;
     m.add("STATUS_DECISION", env::STATUS_DECISION)?;

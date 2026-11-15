@@ -13,7 +13,8 @@
 //! exchanges, and pass when it is forced or exchanging is no longer possible. They are written
 //! in descending static value, so index 0 is always the greedy+leave move.
 
-use crate::encode::{board_codes, encode_afterstate, META};
+use crate::belief::apply_observed;
+use crate::encode::{base_codes, encode_afterstate, META};
 use crate::gaddag::Gaddag;
 use crate::game::Game;
 use crate::leave::LeaveModel;
@@ -80,6 +81,9 @@ struct Slot {
     game: Game,
     controllers: [Controller; 2],
     rng: Rng,
+    /// Random stream for sampling in the opponent-rack inference, apart from the bots' stream
+    /// so that turning the inference on does not change what a random bot plays.
+    belief_rng: Rng,
     status: u8,
     /// Candidates offered for the pending external decision, in the order they were written.
     offered: Vec<Candidate>,
@@ -112,6 +116,7 @@ pub struct BatchEnv {
     slots: Vec<Slot>,
     max_candidates: usize,
     max_exchanges: usize,
+    belief_samples: usize,
 }
 
 impl BatchEnv {
@@ -123,11 +128,23 @@ impl BatchEnv {
             game: Game::new(0),
             controllers: [Controller::External; 2],
             rng: Rng::new(0),
+            belief_rng: Rng::new(0),
             status: STATUS_EMPTY,
             offered: Vec::new(),
             stats: GameStats::default(),
         };
-        BatchEnv { slots: (0..slots).map(|_| empty()).collect(), max_candidates, max_exchanges }
+        BatchEnv { slots: (0..slots).map(|_| empty()).collect(), max_candidates, max_exchanges, belief_samples: 0 }
+    }
+
+    /// Infer what each placement says about its player's rack, from this many sampled racks per
+    /// move (`belief.rs`). 0, the default, infers nothing and costs nothing.
+    pub fn with_belief_samples(mut self, samples: usize) -> BatchEnv {
+        self.belief_samples = samples;
+        self
+    }
+
+    pub fn belief_samples(&self) -> usize {
+        self.belief_samples
     }
 
     pub fn len(&self) -> usize {
@@ -148,6 +165,7 @@ impl BatchEnv {
         s.game = Game::new(seed);
         s.controllers = controllers;
         s.rng = Rng::new(seed ^ 0xB07_5EED);
+        s.belief_rng = Rng::new(seed ^ 0xBE11_EF5);
         s.status = STATUS_DECISION; // settled by the next `prepare`
         s.offered.clear();
         s.stats = GameStats::default();
@@ -182,7 +200,7 @@ impl BatchEnv {
         assert_eq!(out.meta.len(), n * k * META);
         assert_eq!(out.leave_value.len(), n * k);
         assert!(out.count.len() == n && out.mover.len() == n && out.status.len() == n && out.scores.len() == 2 * n);
-        let max_exchanges = self.max_exchanges;
+        let (max_exchanges, samples) = (self.max_exchanges, self.belief_samples);
 
         self.slots
             .par_iter_mut()
@@ -208,7 +226,7 @@ impl BatchEnv {
                                 Controller::Bot(bot) => {
                                     let mv = choose(bot, &slot.game, gaddag, leaves, &mut slot.rng, scratch);
                                     slot.stats.record(slot.game.to_move, &mv);
-                                    slot.game.apply(&mv);
+                                    apply_observed(&mut slot.game, &mv, gaddag, leaves, samples, &mut slot.belief_rng, scratch);
                                 }
                             }
                         }
@@ -218,7 +236,7 @@ impl BatchEnv {
                         } else {
                             slot.status = STATUS_DECISION;
                             select_candidates(&slot.game, gaddag, leaves, scratch, k, max_exchanges, &mut slot.offered);
-                            let base = board_codes(&slot.game.board);
+                            let base = base_codes(&slot.game);
                             let pool = slot.game.unseen(slot.game.to_move);
                             for (i, candidate) in slot.offered.iter().enumerate() {
                                 encode_afterstate(
@@ -244,20 +262,32 @@ impl BatchEnv {
     }
 
     /// Play `actions[slot]` (an index into the candidates written by the last `prepare`) in every
-    /// slot with a pending decision. Other entries are ignored.
-    pub fn apply(&mut self, actions: &[i32]) -> Result<(), String> {
+    /// slot with a pending decision. Other entries are ignored. Nothing is played if any pending
+    /// slot's action is not one of its candidates.
+    pub fn apply(&mut self, gaddag: &Gaddag, leaves: &LeaveModel, actions: &[i32]) -> Result<(), String> {
         assert_eq!(actions.len(), self.slots.len());
-        for (index, (slot, &action)) in self.slots.iter_mut().zip(actions).enumerate() {
-            if slot.status != STATUS_DECISION || slot.offered.is_empty() {
-                continue;
-            }
-            let Some(candidate) = usize::try_from(action).ok().and_then(|a| slot.offered.get(a)) else {
+        let pending = |slot: &Slot| slot.status == STATUS_DECISION && !slot.offered.is_empty();
+        for (index, (slot, &action)) in self.slots.iter().zip(actions).enumerate() {
+            if pending(slot) && usize::try_from(action).map_or(true, |a| a >= slot.offered.len()) {
                 return Err(format!("slot {index}: action {action} is not one of {} candidates", slot.offered.len()));
-            };
-            let mv = candidate.mv;
-            slot.stats.record(slot.game.to_move, &mv);
-            slot.game.apply(&mv);
-            slot.offered.clear();
+            }
+        }
+        let samples = self.belief_samples;
+        let play = |scratch: &mut Scratch, (slot, &action): (&mut Slot, &i32)| {
+            if pending(slot) {
+                let mv = slot.offered[action as usize].mv;
+                slot.stats.record(slot.game.to_move, &mv);
+                apply_observed(&mut slot.game, &mv, gaddag, leaves, samples, &mut slot.belief_rng, scratch);
+                slot.offered.clear();
+            }
+        };
+        if samples == 0 {
+            // Applying a move is a few hundred nanoseconds: not worth a thread pool.
+            let mut scratch = Scratch::default();
+            self.slots.iter_mut().zip(actions).for_each(|item| play(&mut scratch, item));
+        } else {
+            // The inference generates moves for every sampled rack: spread the games over cores.
+            self.slots.par_iter_mut().zip(actions.par_iter()).for_each_init(Scratch::default, play);
         }
         Ok(())
     }
@@ -357,7 +387,7 @@ mod tests {
                 return;
             }
             let actions: Vec<i32> = arrays.count.iter().map(|&c| pick(c)).collect();
-            env.apply(&actions).unwrap();
+            env.apply(gaddag, leaves, &actions).unwrap();
         }
         panic!("games did not finish");
     }
@@ -437,12 +467,12 @@ mod tests {
                 assert!(exchanges <= 3);
             }
             let actions: Vec<i32> = arrays.count.iter().map(|&c| (c - 1).max(0)).collect();
-            env.apply(&actions).unwrap();
+            env.apply(&gaddag, &leaves, &actions).unwrap();
         }
         // An action that is not one of the candidates is an error wherever a decision is pending.
         env.prepare(&gaddag, &leaves, arrays.buffers());
         let pending = arrays.status.iter().any(|&s| s == STATUS_DECISION);
-        assert_eq!(env.apply(&vec![99; n]).is_err(), pending);
+        assert_eq!(env.apply(&gaddag, &leaves, &vec![99; n]).is_err(), pending);
     }
 
     #[test]
@@ -458,5 +488,56 @@ mod tests {
         env.reset(2, 9, [Controller::External; 2]);
         env.prepare(&gaddag, &leaves, arrays.buffers());
         assert_eq!(arrays.status, [STATUS_EMPTY, STATUS_EMPTY, STATUS_DECISION]);
+    }
+
+    #[test]
+    fn inferring_racks_changes_no_game_and_is_reproducible() {
+        use crate::encode::{M_BELIEF, M_BELIEF_INFERRED};
+        let (gaddag, leaves) = (gaddag(), LeaveModel::zero());
+        let (n, k) = (6, 8);
+        let play = |samples: usize| {
+            let mut env = BatchEnv::new(n, k, 2).with_belief_samples(samples);
+            assert_eq!(env.belief_samples(), samples);
+            for slot in 0..n {
+                // One seat decided here, the other by a bot inside the environment.
+                env.reset(slot, 700 + slot as u64, [Controller::External, Controller::Bot(Bot::GreedyLeave)]);
+            }
+            let mut arrays = Arrays::new(n, k);
+            let (mut inferred, mut decisions, mut beliefs) = (0, 0, Vec::new());
+            for _ in 0..500 {
+                env.prepare(&gaddag, &leaves, arrays.buffers());
+                if arrays.status.iter().all(|&s| s != STATUS_DECISION) {
+                    break;
+                }
+                for slot in (0..n).filter(|&slot| arrays.status[slot] == STATUS_DECISION) {
+                    let meta = &arrays.meta[slot * k * META..][..META];
+                    decisions += 1;
+                    if meta[M_BELIEF_INFERRED] == 1 {
+                        inferred += 1;
+                        let total: i32 = meta[M_BELIEF..].iter().map(|&c| c as i32).sum();
+                        let rack = env.game(slot).racks[1].len() as i32;
+                        assert!((total - 256 * rack).abs() <= TILE_TYPES as i32, "expected counts add up to the opponent's rack");
+                        // Every candidate of the decision carries the same inference.
+                        let count = arrays.count[slot] as usize;
+                        for i in 1..count {
+                            assert_eq!(&arrays.meta[(slot * k + i) * META + M_BELIEF..][..TILE_TYPES], &meta[M_BELIEF..]);
+                        }
+                    } else {
+                        assert!(meta[M_BELIEF..].iter().all(|&c| c == 0));
+                    }
+                    beliefs.extend_from_slice(&meta[M_BELIEF..]);
+                }
+                let actions = vec![0; n];
+                env.apply(&gaddag, &leaves, &actions).unwrap();
+            }
+            (arrays.scores.clone(), inferred, decisions, beliefs)
+        };
+        let (plain_scores, plain_inferred, decisions, _) = play(0);
+        let (scores, inferred, _, beliefs) = play(5);
+        let (scores_again, _, _, beliefs_again) = play(5);
+        assert_eq!(plain_inferred, 0);
+        assert_eq!(scores, plain_scores, "the inference observes the games; it does not change them");
+        assert!(inferred > decisions / 3, "most decisions follow a placement by the bot: {inferred} of {decisions}");
+        assert_eq!((scores_again, beliefs_again), (scores, beliefs), "independent of thread scheduling");
     }
 }
