@@ -30,8 +30,11 @@ one batched pass on the GPU.
   letters fit on each empty square), which is how it sees the dictionary, and, each behind a
   switch, how open the board is to the next player, where words can be hooked, and what the
   opponent's last move says about the tiles they kept.
-- **Training**: self-play in one process, a replay buffer in RAM, paired evaluation against the
-  baselines, and resumable checkpoints.
+- **Training**, two ways. Self-play in one process, with a replay buffer in RAM, by TD(lambda)
+  or deep Q-learning. Or from saved games: millions of games between static evaluators, one
+  position from each per pass, the network learning to say who won. Both evaluate in seat-swapped
+  pairs against the baselines and keep resumable checkpoints. The network can be a residual CNN,
+  the same with board-wide pooling, or a transformer.
 - **Scrabble Lab** (`src/scrabble_ai/app`): a local desktop app to start and follow training
   runs, compare them, browse the saved networks, play against them, watch them play, and run
   fast matches with statistics. See [docs/APP.md](docs/APP.md).
@@ -108,6 +111,8 @@ uv run scrabble-ai app                      # Scrabble Lab: everything below, in
 uv run scrabble-ai app --install-shortcut   # put its shortcut on the Desktop
 uv run scrabble-ai train --config configs/train.toml --name night1 --hours 8
 uv run scrabble-ai train --name night1 --resume latest --hours 8
+uv run scrabble-ai games --name twenty-million --games 20000000   # save games to train from (CPU)
+uv run scrabble-ai train-games --games twenty-million --name wdl1 # train a network on them
 uv run scrabble-ai eval runs/night1/checkpoints/best.pt greedy-leave --pairs 2000
 uv run scrabble-ai eval greedy-leave greedy --pairs 2000
 uv run scrabble-ai bench

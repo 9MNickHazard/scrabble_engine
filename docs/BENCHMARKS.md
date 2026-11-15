@@ -135,6 +135,22 @@ arithmetic, not a measurement:** nothing has been timed on the GPU with the new 
 In the same run the bots alone played 2,469 games a second (greedy) and 1,067 (greedy with leave
 values), against 2,356 for greedy on the idle machine above.
 
+### Saved games
+
+Measured on 15 November 2026 on the CPU, with other work running on the machine.
+
+| What | Measured |
+|---|---|
+| Playing and saving games (`scrabble-ai games`, all cores) | 20,000 games in 22.4 s: 894 games/s |
+| Size on disk | 285 bytes a game (23.0 moves a game) |
+| Those games | mean score 432, first player wins 55.4%, 1.97 bingos a player a game |
+| Reading 2,048 training positions back, all cores, no rack inference | 7.3 ms, plus 3.7 ms for their cross masks and openness: 187,000 positions/s |
+| The same with the inference at 4 sampled racks | 175 ms: 11,500 positions/s |
+
+For scale: training the 6 x 64 network ran at 46,000 positions a second in the benchmark above,
+so without the inference the GPU sets the pace of training from games, and with it the engine
+does. Training from games itself has not been timed on the GPU.
+
 ### Larger networks
 
 `uv run scrabble-ai bench --models 12x192,16x192` and

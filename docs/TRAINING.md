@@ -107,6 +107,46 @@ uv run scrabble-ai train --name night1 --resume latest --hours 8 --set train.lea
 A checkpoint refuses to load with a different word list or different leave values than it was
 trained with, because its values would no longer mean the same thing.
 
+## The other way: train from saved games
+
+Two commands, or the "Train from games" tab of the app ([APP.md](APP.md)). [DESIGN.md](DESIGN.md)
+says how it works and [PLAN.md](PLAN.md) why it was added.
+
+```powershell
+uv run scrabble-ai games --name twenty-million --games 20000000      # step 1: play and save the games (CPU only)
+uv run scrabble-ai train-games --games twenty-million --name wdl1    # step 2: train a network on them (GPU)
+uv run scrabble-ai train-games --name wdl1 --resume latest
+```
+
+- **Step 1** uses every CPU core and no GPU: 894 games a second measured here, so 20 million games
+  take about six hours and 5.7 GB in `data/games/twenty-million/`. It can be stopped (`Ctrl+C`, or
+  a file named `STOP` in the set's folder) and continued by running the same command again; a
+  larger `--games` adds to a set. Twenty million is the size at which the published results
+  stopped being short of data.
+- **Step 2** goes through the set `offline.passes` times (6), taking one position from every game
+  each time, then plays a final match of 10,000 pairs against the static evaluator. The console
+  shows the loss on games held out of training and, every half hour, a match of 2,000 pairs.
+  `best.pt` is the network with the highest win rate in those matches.
+- Choose the network with `--set model.kind=cnn` (the default), `cnn-global` or `transformer`
+  (with, say, `--set model.blocks=8 --set model.channels=192`).
+- Training from games starts from other values than self-play for five settings, and prints them
+  as it begins: `model.head=pooled`, `model.win_head=wdl`, `model.aux_heads=true`,
+  `selfplay.win_weight=0.9`, `selfplay.max_candidates=32`. `--set` changes any of them. A
+  `--config` file changes one only by giving it a value other than the built-in one, so passing
+  `configs/train.toml`, which spells out every built-in value, changes nothing.
+- Reading positions back out of the games is fast, 187,000 a second, unless the network takes
+  the inference about the opponent's rack as an input (`model.belief_samples`, 4 by default):
+  that costs four move generations per position and brings it to 11,000 a second, which then
+  sets the pace of training. `--set model.belief_samples=0` removes it.
+- A network trained this way is judged by how often it wins against the static evaluator, not
+  by points; `uv run scrabble-ai eval runs\wdl1\checkpoints\best.pt greedy-leave --pairs 20000`
+  prints both.
+
+None of this has been run on the GPU yet, and no network has been trained with it.
+
+To try **deep Q-learning** in an ordinary self-play run: `--set train.target=q`
+([DESIGN.md](DESIGN.md), "Deep Q-learning as a learning rule").
+
 ## Evaluate a result
 
 ```powershell

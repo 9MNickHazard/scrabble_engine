@@ -191,6 +191,80 @@ plainly bad. The cost of pruning to 64 has not been measured yet (see the plan).
 Before the network plays, the static evaluator plays 100,000 games with a high temperature, so the
 replay buffer starts with a spread of good and bad moves, and the network is pretrained on them.
 
+## The second way to train: from saved games
+
+`scrabble-ai train-games` (`src/scrabble_ai/offline.py`) does not have the network play. It
+learns from a **game set** made beforehand (`scrabble-ai games`, `src/scrabble_ai/games.py`):
+games the static evaluator, score + leave value, played against itself, with up to four of the
+first plies varied so the games are not all alike. This is the recipe of the one project with
+published results for a Scrabble value network that beats a static player
+([PLAN.md](PLAN.md) has the sources and what it measured).
+
+- **A game is stored as its moves**, about 285 bytes, and a position is rebuilt on demand by
+  replaying the game up to a chosen turn (`crates/scrabble-core/src/record.rs`). Replaying needs
+  no move generation. Twenty million games are under 6 GB.
+- **One position per game per pass.** Every position of a game shares its result and nearly the
+  same board, so a network shown all of them learns the games by heart, which is what the first
+  two self-play runs did. Each pass draws a different turn from every game; the batch of a given
+  step is a function of the step and the run's seed alone, so a resumed run carries on exactly.
+- **The target is the result**: win, draw or loss for the player who has just moved, as a
+  three-way classification (`model.win_head = "wdl"`). The points still to gain stay as a second
+  output. A network that only has to say who wins learns to give up a few points to leave the
+  opponent less, which the points of one game, being mostly luck, could not teach it.
+- **Helper outputs** (`model.aux_heads`), never used to choose a move: the opponent's next score
+  and whether they place all seven tiles, and for every square whether the opponent's next move,
+  and the mover's own, puts a tile there. Predicting what the opponent does next is a much less
+  noisy lesson about a position than the final result is. Each helper's pull on the network is
+  held to a share (`offline.aux_share`, 0.15) of the main output's, measured as gradient norms on
+  the shared board features and re-measured every hundred steps; with fixed weights a helper
+  that is easy to improve out-pulls the output that matters.
+- **The head is pooled** (`model.head = "pooled"`): the outputs see the board through each
+  channel's mean and maximum only. The original head had a weight for every channel of every
+  square, 460,800 of the first networks' 1,055,056 weights, which is where a board can be learned
+  by heart.
+- **The network that is evaluated and saved is a running average** of the trained weights (over
+  about a thousand steps), which is steadier than the weights of any one step.
+- **Choosing a move.** A network trained this way picks by win chance, with points breaking
+  ties: `selfplay.win_weight = 0.9` in `utility = (1 - w) x (score + V) + w x 100 x (2 P(win) - 1)`.
+  An untrained one gives every candidate even odds, the first term decides, and it plays exactly
+  like the static evaluator, as before. The setting travels with the checkpoint, so matches,
+  evaluations and games in the app all play a network the way it was trained to play.
+- **It is judged by how often it wins**, in matches against the static evaluator. The best
+  network is the one with the highest win rate. Points are reported too, but a network like this
+  can be behind on points and ahead on wins.
+
+## Three kinds of network
+
+`model.kind` chooses the body; every kind turns the inputs into `channels` features for each of
+the 225 squares, and the same outputs read them.
+
+| Kind | What it is | What is known |
+|---|---|---|
+| `cnn` | Residual blocks of 3 x 3 convolutions | Fast. In the published Scrabble comparison, convolutional networks of 64 to 128 channels all stopped near 52.5% against the static player, without the helper outputs |
+| `cnn-global` | The same, with every third block also summarising the whole board (the mean and maximum of a quarter of its channels) and adding the summary back at every square | KataGo's global pooling, worth a factor of 1.6 in training efficiency in Go. Nobody has published it for Scrabble |
+| `transformer` | One token per square and one for the rack and bag, then `blocks` layers of attention of width `channels`, in which every square can look at every other | The shape of the strongest published Scrabble value networks (57.65% at 8 layers of 192, with the helper outputs). Several times the cost of the convolutional kinds; not timed here yet |
+
+## Deep Q-learning as a learning rule
+
+The 2025 version of this project was a deep Q-network. `train.target = "q"` brings Q-learning
+back as the learning rule of the self-play trainer, in the form that fits this network. A
+textbook DQN has one output per action; Scrabble has thousands of different legal moves every
+turn, so here `Q(move) = score + V(position the move leaves)`, and the one-step Q-learning target
+for a position is
+
+    V(position after my move)  <-  - max over the opponent's moves of (score + V)
+
+where the maximum is taken over the candidates of the opponent's next decision, valued by the
+self-play copy of the network. That copy lags the learner and is refreshed every
+`train.actor_sync_steps` steps, so it is the target network of a DQN, and the replay buffer is
+its experience replay. The default rule, `"td"`, differs in one thing: it learns from the move
+the opponent actually played (softened by `td_lambda`), not from the one rated best.
+
+The difference matters when the ratings are unreliable. A maximum over 64 uncertain numbers is
+biased upward, the same effect that made the first runs' move choices worse, and Q-learning
+builds it into the target. Whether that hurts here is for a run to say; neither rule has yet
+produced a network that beats the static evaluator.
+
 ## Evaluation
 
 Every seed is played twice with the players swapping seats; the statistic is the mean over pairs

@@ -48,7 +48,16 @@ the old code. Machine-specific notes, if any, are in `CLAUDE.local.md` (not comm
   written before it exist load as not having it. `tests/test_inputs.py` shows what to test.
   Anything worked out from the board alone (cross masks, openness) is recomputed by the engine
   for candidates and replayed positions alike and is not stored in the replay buffer.
-- Run one `pytest` session at a time. Two at once delete each other's temporary folders.
+- Run one `pytest` session at a time. Two at once delete each other's temporary folders (give
+  each its own `--basetemp` if two must run).
+- To keep a test run off the GPU, set `CUDA_VISIBLE_DEVICES=-1`. An empty value does not hide it
+  on Windows (and PowerShell 5.1 deletes a variable set to `''`). Hidden, the suite skips its
+  four `cuda_only` tests.
+- There are two trainers: `train.py` (self-play; `train.target` is `td` or `q`) and `offline.py`
+  (from a game set made by `games.py`; settings in `[offline]`, and `OFFLINE_DEFAULTS` in
+  `config.py` for what it changes elsewhere). Runs of both kinds live in `runs/` and are told
+  apart by `offline.games` being set. A run trained from games is judged by win rate against the
+  static evaluator, never by spread. Game sets live in `data/games/` (not committed).
 - `legacy/` is reference only. Do not import from it, fix it or extend it.
 - The desktop app is `src/scrabble_ai/app/` (`uv run scrabble-ai app`; docs in `docs/APP.md`,
   the page/server contract in `docs/APP_API.md`). The server is standard-library Python bound to

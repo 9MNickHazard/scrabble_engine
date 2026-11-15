@@ -69,7 +69,8 @@ Before the first training run the project needs a word list and leave values
 
 What is training now (progress against its limit, games per second, its latest result against
 the baseline with a small chart), what is queued, the GPU's load and memory, the strongest
-network of each run, and the most recent runs and matches.
+network of each run, and the most recent runs and matches. Runs trained from games are shown by
+their win rate against the static evaluator, where self-play runs are shown by points per game.
 
 When nothing is training, the top panel is the **latest run**: its verdict in a sentence, its
 latest and best evaluations, how long it trained, its strength chart, and **Open all charts**.
@@ -78,9 +79,17 @@ better than the baseline until an evaluation's whole interval is above zero.
 
 ### Training
 
-**Start training.** Pick a starting point (Default 6x64, Larger 10x128, Wide 12x192, or a
-30-minute quick test), give the run a name and a time limit, and press Start. Everything else
-keeps its default from [configs/train.toml](../configs/train.toml).
+This page is for **self-play** runs: a network that learns from games it plays against itself.
+Runs that learn from saved games have their own page, Train from games, below.
+
+**Start training.** Pick a starting point (Default 6x64, Larger 10x128, Wide 12x192, Deep
+Q-learning 6x64, or a 30-minute quick test), give the run a name and a time limit, and press
+Start. Everything else keeps its default from [configs/train.toml](../configs/train.toml).
+
+**Deep Q-learning 6x64** is the default network with one setting changed, the learning rule
+(`train.target = "q"`, "Learning rule" in All settings): each position learns from the move the
+network rates best for the opponent, where the default learns from the move that was played.
+[DESIGN.md](DESIGN.md) says what that means here and why it may or may not help.
 
 - **Network size** is residual blocks x channels. The sizes that have been benchmarked on this
   PC are one click each, and the line under them says how fast that size trains here and how
@@ -109,7 +118,7 @@ at the same time is worth it only when the runs should see the same wall-clock h
 they are small enough that the GPU is not the limit. GPU memory adds up when runs share it, and
 the app warns when the total would not fit.
 
-**History** lists every run with its status, a verdict, a small chart of its strength over the
+**History** lists every self-play run with its status, a verdict, a small chart of its strength over the
 run, its latest results against both baselines, games, speed and time. The verdict is one of
 **Beats the baseline** (the latest evaluation's whole interval is above zero), **Level with the
 baseline**, **Behind the baseline**, or **Got worse** (the latest evaluation is significantly
@@ -131,9 +140,59 @@ A result is written as **+4.2 ± 7.8**: the average points per game by which the
 that opponent over seat-swapped pairs of games, and the half-width of the 95% interval. A green
 triangle means the whole interval is above zero, which is the only thing this app calls a win.
 
+### Train from games
+
+The second way to train ([DESIGN.md](DESIGN.md), "The second way to train"): a network learns
+from millions of games the static evaluator played against itself, and is judged by how often it
+then beats that evaluator. Two steps, top to bottom on the page.
+
+**Step 1: make a game set.** Give it a name and a number of games (1, 5, 20 or 50 million are one
+click each) and press Make game set. The line under the form says how much disk and time that
+takes, from the speed of the last set built on this PC: about 286 bytes and a little over a
+millisecond a game, so 20 million games are about 5.7 GB and six hours. Building uses every CPU
+core and no GPU, and carries on with the app closed. **More options** holds how the first plies
+of each game are varied, which is fixed once a set exists.
+
+The table lists every set with its status (Building, Stopping, Complete, Partial, Empty or
+Failed), games, size, speed, and what its games look like. From a row: **Stop** (it finishes its
+block of 5,000 games; nothing is lost), **Add more games** (a stopped or complete set can be
+made larger), **Log**, and Delete, which is refused while a run is training from the set.
+
+**Step 2: train a network.** Choose the set, then the model:
+
+| Model | What it is |
+|---|---|
+| CNN 6x64 | The convolutional network of the self-play runs, with the pooled head. The fastest |
+| CNN with board-wide pooling 6x64 | The same with KataGo's global pooling: every square is told about the whole board |
+| Transformer 8x192 | The shape of the strongest published Scrabble value networks. Several times slower; not timed here yet |
+| Quick test | A tenth of a pass with short matches, to check that everything works |
+
+Then a name, a time limit (0: until its passes are done) and the number of passes, and Start.
+The panel on the right shows what the run will be: positions per pass (one from every game, less
+the games held out), steps, and whether it starts now or waits in the queue behind what is
+already training. **All settings** has the rest, with the defaults that apply to training from
+games (pooled head, win/draw/loss output, helper outputs on, moves chosen by win chance).
+
+**Runs trained from games** lists them with a verdict (Beats the static bot, Level with the
+static bot, Behind the static bot, or Got worse), the win rate at each match as a small chart,
+the latest win rate with its 95% interval, how far through its passes the run is, and Open,
+Stop, Resume, Rename and Delete as on the Training page. A green triangle means the whole
+interval is above 50%, which is the only thing the app calls a win.
+
+A network trained here appears on Models, and can be played against, watched and put in the
+Arena like any other; it picks its moves by win chance, as it was trained to.
+
 ### A run's page
 
 Click a run's name or its Charts button. The six figures at the top are live while it trains.
+
+For a run trained from games the page has the same five tabs in other terms: the main chart is
+the **win rate against the static evaluator** with its interval (50% is level) and the spread as
+a second chart; "Is it learning?" compares the loss on the batches it trains on with the loss on
+held-out games (held-out rising while training falls is memorising), how often it names the
+result of a held-out position, and its points error beside leave values alone; then the helper
+outputs' losses and weights, the learning rate and positions per second. The rest of this
+section describes a self-play run.
 
 - **Progress** opens with **How it went**: the verdict in a sentence, and, when the run got worse
   or is predicting new games worse than leave values alone, a note saying so with a link to the
@@ -224,7 +283,8 @@ values are fitted, and the GPU.
 
 | | |
 |---|---|
-| `runs/<name>/` | One folder per training run: checkpoints, metrics, console log, settings |
+| `runs/<name>/` | One folder per training run of either kind: checkpoints, metrics, console log, settings |
+| `data/games/<name>/` | One folder per game set: the games, their index, and what the set was made with |
 | `data/app/matches/` | One folder per match |
 | `data/app/library.json` | Stars and notes |
 | `data/app/app.log` | The app's own errors, if any |
@@ -236,6 +296,8 @@ None of it is in the repository. Deleting a run or a match in the app deletes it
 - **A training run:** Stop on its row or its page. It saves before stopping and can be resumed.
   From a terminal, `New-Item runs\<name>\STOP` does the same.
 - **A queue:** Cancel the queued runs, or stop the running one; the queue then starts the next.
+- **A game set being built:** Stop on its row; it keeps the games made so far and can be added to
+  later. From a terminal, `New-Item data\games\<name>\STOP` does the same.
 - **A match:** Cancel on its page.
 - **The app:** close its window.
 

@@ -170,9 +170,17 @@ game pairs, level with a 2-ply simulation. His CNNs of 64 to 128 channels all st
 Most of the Scrabble-specific evidence is one author's; his headline result was reproduced
 independently (John O'Laughlin). The changes of 13 November above stop the damage but do not
 address the amount of data or the target, and a run of a few hours with them is still about a
-tenth of what he found too little. **Rebuilding training around static-bot games, a win/draw/loss
-target and evaluation over tens of thousands of pairs is the recommended next step. It has not
-been started.**
+tenth of what he found too little. Rebuilding training around static-bot games, a win/draw/loss
+target and evaluation over tens of thousands of pairs was the recommended next step.
+
+**That is now built (15 November 2026) and has not yet been run on the GPU:** `scrabble-ai games`
+and `scrabble-ai train-games`, and the "Train from games" tab of the app
+([DESIGN.md](DESIGN.md), "The second way to train"). It follows the recipe in the right-hand
+column: one fresh position per game per pass, a win/draw/loss target with points as a helper,
+a pooled head, and the helper outputs with their pull balanced. Three kinds of network can be
+trained with it (`model.kind`): the convolutional one, the same with KataGo's board-wide pooling,
+and a transformer. Also added on request, for the self-play trainer: deep Q-learning as a
+learning rule (`train.target = "q"`).
 
 On 14 November seven groups of inputs were added on request ([DESIGN.md](DESIGN.md), "What the
 network is given"): the move's score and other scalars, the opponent's last move, board openness,
@@ -190,11 +198,18 @@ the last three.
 | What does pruning to 64 candidates cost? | Evaluate a trained network with `--candidates 64` against itself with `--candidates 256`. |
 | How much do the cross-check planes buy? | A run with `model.cross_checks=false`, compared by evaluation. |
 
-**Recommended next run:** the defaults, 6 x 64, three hours.
+**Recommended next runs**, in this order (the first is CPU only and can run while the GPU is busy):
 
 ```powershell
-uv run scrabble-ai train --config configs/train.toml --name td-run-1 --hours 3
+uv run scrabble-ai games --name twenty-million --games 20000000     # about six hours, 5.7 GB
+uv run scrabble-ai train-games --games twenty-million --name wdl-cnn-1
 ```
+
+What to look for: the win rate against the static evaluator in the half-hourly matches, which
+in the published results reached about 51 to 53% for convolutional networks trained this way and
+57% with the helper outputs on a transformer. If the convolutional network stops near 52 to 53%,
+the transformer (`--set model.kind=transformer --set model.blocks=8 --set model.channels=192`)
+is the next thing to try on the same games.
 
 ## Phase 4: the app, analysis and play (app done)
 
