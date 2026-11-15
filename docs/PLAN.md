@@ -146,6 +146,40 @@ states when a run has got worse, and [TUNING.md](TUNING.md) says what to try.
 **These changes follow from the diagnosis and are covered by tests, but no full run has used
 them yet.** Whether they are enough is the next thing to find out.
 
+### What other people have measured (research, 14 November 2026)
+
+One documented project has trained a value network that beats a static score + leave player:
+Cesar Del Solar's networks for Macondo, the engine behind the Woogles bots
+([June 2025](https://www.cesardelsolar.com/posts/2025-06-21-nn-scrabble/),
+[October 2026](https://www.cesardelsolar.com/posts/2026-10-18-transformer-scrabble/),
+[experiment log](https://raw.githubusercontent.com/domino14/macondo/master/pytorch/experiments.md)).
+On the same class of GPU, with inputs close to the original set here (85 board planes), his
+best network without search wins 57.65% +/- 0.18 of games against the static bot over 100,000
+game pairs, level with a 2-ply simulation. His CNNs of 64 to 128 channels all stopped near
+52.5%: "the network isn't the bottleneck". What his recipe does that the first runs here did not:
+
+| | The first runs here | What worked there |
+|---|---|---|
+| Independent games | about 450,000 | 20 million and more (5.4 million was "starved": 50.98%) |
+| Positions used per game | all, about four times each | one fresh random position per game per pass |
+| Main target | final spread | win, draw or loss of the game; spread as a helper output |
+| Training games | self-play, exploring all game | two static bots, only the opening randomised |
+| Head | flattened per-square layer | global pooling |
+| Extra outputs | none | the opponent's next score and bingo, and where the next moves land (about +4 points of win rate, measured on a transformer only) |
+
+Most of the Scrabble-specific evidence is one author's; his headline result was reproduced
+independently (John O'Laughlin). The changes of 13 November above stop the damage but do not
+address the amount of data or the target, and a run of a few hours with them is still about a
+tenth of what he found too little. **Rebuilding training around static-bot games, a win/draw/loss
+target and evaluation over tens of thousands of pairs is the recommended next step. It has not
+been started.**
+
+On 14 November seven groups of inputs were added on request ([DESIGN.md](DESIGN.md), "What the
+network is given"): the move's score and other scalars, the opponent's last move, board openness,
+hook squares and an inference about the opponent's rack. Each has a switch. None has been used
+in a run, and the research gives no reason to expect much from inputs: his networks have none of
+the last three.
+
 **What is still open:**
 
 | Open question | How it gets answered |

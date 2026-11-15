@@ -39,7 +39,11 @@ src/scrabble_ai/
 Everything below describes the position **after** a candidate move, from the side of the player
 who made it, before any tiles are drawn. All of it is information that player has.
 
-**Board planes (87 planes of 15 x 15):**
+The inputs come in groups. The first tables are what every network has had; the groups added on
+14 November 2026 follow, each with its own switch in `[model]`. A network saved before that date
+has none of the later groups, and sees exactly the layout it was trained with.
+
+**Board planes (87 planes of 15 x 15, 100 with every group):**
 
 | Planes | Content |
 |---|---|
@@ -58,7 +62,7 @@ depends on 195,747 words the network would otherwise have to memorize from game 
 these planes a hook square for an S, a square nothing fits on, and a wide-open lane all look
 different in the input.
 
-**Vector (72 numbers):**
+**Vector (72 numbers, 144 with every group):**
 
 | Entries | Content |
 |---|---|
@@ -67,20 +71,54 @@ different in the input.
 | 13 | Tiles left in the bag after the mover draws; tiles the mover will draw; leave size; spread; scoreless turns in a row; opponent's tile count; flags for an empty bag and a bag too small to exchange; whether the move was a placement, exchange or pass; size of the unseen pool; the static leave value |
 | 5 | The opponent's previous turn: whether it was a placement, an exchange or a pass, how many tiles it used, and what it scored |
 
+**The groups added on 14 November 2026** (`src/scrabble_ai/features.py` has the exact layout):
+
+| Setting | Adds | Content |
+|---|---|---|
+| `model.extra_scalars` | 13 numbers | The points the move scored; whether the opponent has ever placed all seven tiles and how many turns ago; the share of the unseen pool that is blanks, S, J, Q, X and Z (one number each), vowels and consonants; the vowel and consonant share of the leave |
+| `model.last_move_plane` | 1 plane | The tiles the opponent's previous move placed |
+| `model.openness` | 6 planes, 4 numbers | What the next player could do with the board: for each empty square, how few tiles a placement along the row needs in order to cover it, and the same down the column; whether a seven-tile placement can cover it, in each direction; the triple-word and double-word squares that are in reach. The numbers count the triple- and double-word squares in reach, the share of empty squares in reach, and the squares where seven tiles fit |
+| `model.hooks` | 6 planes | The empty squares where one letter extends a word on the board: after a row word, before it, below a column word, above it, each with the share of the alphabet that fits there; and where an S fits after a row word or below a column word |
+| `model.belief_samples` | 55 numbers | The expected number of each tile type on the opponent's rack, how that differs from a rack drawn blind from the unseen pool, and whether an inference was made. 0 leaves the group out |
+
+Openness asks only about the shape of the board: a placement is any run of one to seven empty
+squares in a line that joins what is there and that no cross-check rules out. Whether a real word
+fits is not asked, so it is the same for every rack. It is worked out by the engine for every
+candidate (`encode::open_squares`), like the cross-check masks and from them, and like them it
+is recomputed when a position is replayed, not stored. The hook planes are the cross-check masks
+again, picked out for the squares that touch the end of a word, and are built on the GPU.
+
+**The inference about the opponent's rack** (`crates/scrabble-core/src/belief.rs`) is the one
+group that costs real time. When a player places tiles, the engine samples `belief_samples`
+leaves they might have kept, uniformly from the tiles the other player cannot see. For each it
+generates every move the mover would then have had, and weighs the sample by how close the move
+actually played comes to the best of them in static value: `exp(-(best - played) / 6)`. The
+weighted mean of the samples is the expected leave, and the tiles then drawn come uniformly from
+what is left. This is the method of Richards and Amir ("Opponent Modeling in Scrabble", IJCAI
+2007) with a soft weight, because self-play explores and a network does not always play the
+static best. Exchanges and passes are not interpreted. Each sample is one full move generation
+per move played.
+
 **What is deliberately withheld:** the opponent's rack, while tiles remain in the bag. Once the bag
 is empty the unseen pool *is* the opponent's rack, which any player can work out, so the network
 sees it then. A test swaps the opponent's hidden rack for other tiles and requires every input
-byte to be unchanged (`tests/properties.rs`).
+byte to be unchanged, and another swaps the tiles a mover actually kept for others from the bag
+and requires the inference about them to be unchanged (`tests/properties.rs`): the inference
+uses the move and the unseen pool as a whole, never the rack itself.
 
 The opponent's previous turn is there because it is public and it hints at what they hold:
 someone who just exchanged five tiles probably kept two good ones, and someone who just played a
 bingo has a fresh random rack.
 
+**None of the added groups has been shown to help.** They were added on request, each behind a
+switch so that it can be measured. The one published study of Scrabble value networks with
+measured results (Macondo's, see [PLAN.md](PLAN.md)) got its gains from the training target and
+the amount of data, with inputs close to the original set here.
+
 **What it does not have yet:**
 
-- **Anything further back than one turn**, and nothing about *which* tiles the opponent played.
-  A strong human reads more into the opponent's play than a three-number summary of their last
-  turn. Proper rack inference is a project of its own.
+- **Anything further back than one turn.** The inference reads the opponent's last placement
+  only; a strong human remembers what they have been doing all game.
 - **Any look-ahead.** The network judges a position in one glance. It does not try the opponent's
   replies. Simulation and endgame search (Phase 5 of the plan) are where engines get most of their
   remaining strength, and they use a value network like this one at their leaves.
@@ -94,7 +132,8 @@ layer ("I hold an S and there is an S hook"), and again in the head. The head se
 1 x 1 projection (so it knows where things are), global mean and max, and the vector features.
 
 Two outputs: the **value** (spread still to be gained, in units of 50 points) and a **win
-logit**. About 1.05 million parameters at the default size.
+logit**. About 1.07 million parameters at the default size with every input group (1.06 million
+with the original inputs).
 
 Two choices keep an untrained network sane:
 

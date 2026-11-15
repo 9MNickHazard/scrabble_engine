@@ -41,6 +41,14 @@ the old code. Machine-specific notes, if any, are in `CLAUDE.local.md` (not comm
 - The first real runs (2026-11-13) memorised their own games and got worse; `docs/PLAN.md` has
   the numbers and the changed defaults (replay ratio 1, TD(lambda) 0.7, the guard). Those
   defaults are untested by a full run: do not describe them as working until one says so.
+- Network inputs are groups in `src/scrabble_ai/features.py` (`FeatureSet`), each switched by a
+  `[model]` setting. To add one: append it after the existing groups (never in between: a saved
+  network must keep seeing its own layout), give it a setting, and list that setting in
+  `BEFORE_IT_EXISTED` in `config.py` with the value meaning "not there", so that checkpoints
+  written before it exist load as not having it. `tests/test_inputs.py` shows what to test.
+  Anything worked out from the board alone (cross masks, openness) is recomputed by the engine
+  for candidates and replayed positions alike and is not stored in the replay buffer.
+- Run one `pytest` session at a time. Two at once delete each other's temporary folders.
 - `legacy/` is reference only. Do not import from it, fix it or extend it.
 - The desktop app is `src/scrabble_ai/app/` (`uv run scrabble-ai app`; docs in `docs/APP.md`,
   the page/server contract in `docs/APP_API.md`). The server is standard-library Python bound to

@@ -105,6 +105,36 @@ With GroupNorm instead (`--norm group`), measured earlier the same day with the 
 the 6 x 64 network scored 54,371 positions/s in self-play and trained at 21,621 positions/s using
 3.84 GB. That is why the default is no normalization.
 
+### What the inputs cost the engine
+
+`uv run scrabble-ai bench --no-gpu --quick` (the "network inputs on the CPU" section; no GPU is
+involved). One self-play step of 256 games with 64 candidates each, all cores, the static
+evaluator choosing the moves. Measured on 14 November 2026 **while the machine was busy with
+other work**, so the absolute figures are rough; the comparison between rows and columns is what
+to read.
+
+| Racks sampled per move (`model.belief_samples`) | Candidates and afterstates | Applying the moves, with the inference | Cross masks | Openness | Decisions/s the engine could feed |
+|---|---|---|---|---|---|
+| 0 | 15.8 ms | 0.1 ms | 5.8 ms | 11.1 ms | 7,806 |
+| 2 | 17.2 ms | 13.8 ms | 6.9 ms | 12.7 ms | 5,061 |
+| 6 | 18.0 ms | 34.7 ms | 6.9 ms | 12.8 ms | 3,540 |
+| 12 | 16.9 ms | 63.8 ms | 6.3 ms | 11.9 ms | 2,588 |
+
+The inference costs about 5.6 ms per sampled rack per step: one move generation for each of 256
+moves, spread over the cores. Racks with a blank are what make it expensive (a blank multiplies
+move generation by ten, see above). On one core, one board's cross masks take 3 to 8
+microseconds and its openness 7 to 11.
+
+For scale: in the self-play benchmark above, a step of 256 decisions took 156 ms in all (1,645
+decisions a second), of which the engine's share with the original inputs was about 22 ms. The
+rest is the network. Adding openness and four sampled racks brings the engine's share to about
+60 ms, which would put a step at roughly 195 ms, a fifth slower. **That last figure is
+arithmetic, not a measurement:** nothing has been timed on the GPU with the new inputs.
+`uv run scrabble-ai bench --inputs original` against `--inputs all` is the measurement to make.
+
+In the same run the bots alone played 2,469 games a second (greedy) and 1,067 (greedy with leave
+values), against 2,356 for greedy on the idle machine above.
+
 ### Larger networks
 
 `uv run scrabble-ai bench --models 12x192,16x192` and

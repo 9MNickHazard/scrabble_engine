@@ -142,9 +142,11 @@ each kind of trouble. The settings that matter most:
 | `train.replay_ratio` | 1.0 | Training samples per new position: about how often each position is trained on | Leave it at 1 or below. At 4 the first runs memorised their games. |
 | `train.td_lambda` | 0.7 | 1 trains on actual game results; lower leans on the estimate of the next position | 0.5 if a run still memorises; towards 0.9 if its estimates drift. |
 | `train.guard`, `guard_patience` | true, 2 | Go back to the best network and halve the learning rate after this many evaluations in a row significantly behind it | Turn it off only to see what a setting does unprotected. |
-| `train.replay_capacity` | 3,000,000 | Positions kept in RAM (0.9 GB) | Raise it to train on a longer history; 10,000,000 is about 3 GB. |
+| `train.replay_capacity` | 3,000,000 | Positions kept in RAM (1.1 GB) | Raise it to train on a longer history; 10,000,000 is about 3.7 GB. |
 | `selfplay.win_weight` | 0.0 | 0 picks moves by expected spread, 1 by win probability | Leave at 0 while training. Use it at evaluation time to see how win-seeking play does. |
 | `model.cross_checks` | true | Whether the network sees which letters fit on each empty square | Turn off only as an experiment to measure what it is worth. Cannot be changed when resuming. |
+| `model.extra_scalars`, `last_move_plane`, `openness`, `hooks` | true | Input groups added on 14 November 2026 ([DESIGN.md](DESIGN.md)) | Turn one off to measure what it is worth. None has been shown to help yet. Cannot be changed when resuming. |
+| `model.belief_samples` | 4 | Racks sampled per move to infer what the opponent kept; the result is an input | 0 removes the input and its cost, about 5.6 ms a step per sampled rack ([BENCHMARKS.md](BENCHMARKS.md)). Cannot be changed when resuming. |
 | `warmstart.games` | 100,000 | Size of the warm start | 0 skips it and starts self-play with an untrained network (which, with `leave_baseline`, plays like the greedy+leave bot). |
 | `train.eval_minutes`, `eval_pairs` | 20, 250 | How often and how carefully to evaluate | More pairs narrow the confidence interval and cost a few seconds each time. |
 
@@ -158,7 +160,7 @@ Measured on this PC (RTX 5070 Ti, Ryzen 7 7800X3D) with the default 6 x 64 netwo
   managed 18 a second (441,805 games in 6.67 hours). The current replay ratio of 1 does a quarter
   of the training per game, so self-play should be somewhat faster; that has not been measured.
 - GPU memory: under 2 GB. RAM: about 1 GB for the replay buffer.
-- Disk: up to 0.9 GB for the replay buffer plus about 20 MB per checkpoint (5 are kept).
+- Disk: up to 1.1 GB for the replay buffer plus about 20 MB per checkpoint (5 are kept).
 
 ## Files a run writes
 

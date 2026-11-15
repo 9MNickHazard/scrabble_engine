@@ -27,7 +27,9 @@ one batched pass on the GPU.
   lockstep.
 - **Network** (`src/scrabble_ai`, PyTorch): a residual CNN over the 15 x 15 board plus the rack
   leave, the unseen tiles and a few scalars. Among its inputs are the cross-check sets (which
-  letters fit on each empty square), which is how it sees the dictionary.
+  letters fit on each empty square), which is how it sees the dictionary, and, each behind a
+  switch, how open the board is to the next player, where words can be hooked, and what the
+  opponent's last move says about the tiles they kept.
 - **Training**: self-play in one process, a replay buffer in RAM, paired evaluation against the
   baselines, and resumable checkpoints.
 - **Scrabble Lab** (`src/scrabble_ai/app`): a local desktop app to start and follow training
